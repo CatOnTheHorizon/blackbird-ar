@@ -55,7 +55,7 @@
      <span style="opacity:.6">（会请求摄像头权限，画面不会上传）</span></p>
   <button id="startBtn">开始探索</button>
   <button id="previewBtn">先看一眼彩蛋 →</button>
-  <p style="font-size:11px;opacity:.4;margin-top:14px">v3</p>
+  <p style="font-size:11px;opacity:.4;margin-top:14px">v4</p>
 </div>
 
 <div id="container"></div>
@@ -92,6 +92,17 @@ const statusEl   = document.getElementById('status');
 const hintEl     = document.getElementById('scanHint');
 const splash     = document.getElementById('splash');
 const preview    = document.getElementById('preview');
+
+/* 手机上看不到控制台：把未捕获错误直接显示到状态栏 */
+const showErr = (msg) => {
+  statusEl.classList.remove('hidden');
+  statusEl.textContent = '⚠ ' + String(msg).slice(0, 120);
+};
+window.addEventListener('error', (e) => showErr(e.message || '脚本错误'));
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  showErr((r && (r.message || r)) || '未处理的异常');
+});
 
 document.getElementById('previewBtn').addEventListener('click', () => {
   splash.style.display = 'none';
@@ -190,6 +201,18 @@ async function startAR() {
   const anchor = mindarThree.addAnchor(0);
   buildBirdScene(anchor);
 
+  /* 阶段提示：手机首次初始化可能要 10-60 秒，让用户看到进展 */
+  const origVideo = mindarThree._startVideo.bind(mindarThree);
+  mindarThree._startVideo = async () => {
+    statusEl.textContent = '启动摄像头…';
+    return origVideo();
+  };
+  const origAR = mindarThree._startAR.bind(mindarThree);
+  mindarThree._startAR = async () => {
+    statusEl.textContent = '初始化识别引擎…（首次最长约 1 分钟，请稍等）';
+    return origAR();
+  };
+
   anchor.onTargetFound = () => {
     statusEl.textContent = '✦ 彩蛋解锁 ✦';
     hintEl.classList.add('hidden');
@@ -202,13 +225,13 @@ async function startAR() {
 
   const startPromise = mindarThree.start();
   const timeout = new Promise((_, rej) =>
-    setTimeout(() => rej(new Error('启动超时（30秒）')), 30000));
+    setTimeout(() => rej(new Error('初始化超时（90秒）')), 90000));
   try {
     await Promise.race([startPromise, timeout]);
   } catch (e) {
     console.error(e);
     statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
-    setTimeout(() => { splash.style.display = 'flex'; }, 3000);
+    setTimeout(() => { splash.style.display = 'flex'; }, 4000);
     return;
   }
   statusEl.classList.add('hidden');
