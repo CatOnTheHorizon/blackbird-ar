@@ -132,6 +132,24 @@ startBtn.addEventListener('click', startAR);
 async function startAR() {
   splash.style.display = 'none';
   statusEl.classList.remove('hidden');
+
+  /* 第 1 步：自己先做摄像头权限检查（MindAR 内部对权限拒绝的报错传不出来，必须自查） */
+  statusEl.textContent = '请求摄像头权限…（请在弹窗中允许）';
+  let camStream = null;
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }
+    });
+    camStream.getTracks().forEach(t => t.stop());   // 验完立刻释放
+  } catch (e) {
+    statusEl.textContent = e && e.name === 'NotAllowedError'
+      ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」（或点浏览器地址栏旁的摄像头图标重新允许）'
+      : '无法访问摄像头：' + (e && e.message || e.name || '未知错误');
+    setTimeout(() => { splash.style.display = 'flex'; }, 3000);
+    return;
+  }
+
+  /* 第 2 步：权限没问题再启动 MindAR（此时内部请求摄像头会秒过） */
   statusEl.textContent = '加载识别数据…（首次约几秒）';
 
   const mindarThree = new MindARThree({
@@ -154,12 +172,15 @@ async function startAR() {
     hintEl.classList.remove('hidden');
   };
 
+  const startPromise = mindarThree.start();
+  const timeout = new Promise((_, rej) =>
+    setTimeout(() => rej(new Error('启动超时（30秒）')), 30000));
   try {
-    await mindarThree.start();
+    await Promise.race([startPromise, timeout]);
   } catch (e) {
     console.error(e);
-    statusEl.classList.remove('hidden');
-    statusEl.textContent = '摄像头启动失败：请允许摄像头权限后刷新重试';
+    statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
+    setTimeout(() => { splash.style.display = 'flex'; }, 3000);
     return;
   }
   statusEl.classList.add('hidden');
