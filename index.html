@@ -55,7 +55,7 @@
      <span style="opacity:.6">（会请求摄像头权限，画面不会上传）</span></p>
   <button id="startBtn">开始探索</button>
   <button id="previewBtn">先看一眼彩蛋 →</button>
-  <p style="font-size:11px;opacity:.4;margin-top:14px">v5</p>
+  <p style="font-size:11px;opacity:.4;margin-top:14px">v6</p>
 </div>
 
 <div id="container"></div>
@@ -304,7 +304,7 @@ function buildBirdScene(anchor) {
      预览模式传入的是 THREE.Group 本身 —— 两者兼容 */
   const root = anchor.group || anchor;
   root.add(group);
-
+  if (!anchor.userData) anchor.userData = {};   // 普通对象没有 userData，补上
   anchor.userData.animate = (t) => {
     crows.forEach((c) => {
       const u = c.userData;
