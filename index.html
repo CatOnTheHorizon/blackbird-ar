@@ -135,13 +135,18 @@ async function startAR() {
 
   /* 第 1 步：自己先做摄像头权限检查（MindAR 内部对权限拒绝的报错传不出来，必须自查） */
   statusEl.textContent = '请求摄像头权限…（请在弹窗中允许）';
+  const permHint = setTimeout(() => {
+    statusEl.textContent = '还在等待授权…请检查浏览器是否弹出了摄像头权限窗口，或刷新页面重试';
+  }, 25000);
   let camStream = null;
   try {
     camStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment' }
     });
+    clearTimeout(permHint);
     camStream.getTracks().forEach(t => t.stop());   // 验完立刻释放
   } catch (e) {
+    clearTimeout(permHint);
     statusEl.textContent = e && e.name === 'NotAllowedError'
       ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」（或点浏览器地址栏旁的摄像头图标重新允许）'
       : '无法访问摄像头：' + (e && e.message || e.name || '未知错误');
