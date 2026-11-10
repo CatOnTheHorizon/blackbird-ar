@@ -55,6 +55,7 @@
      <span style="opacity:.6">（会请求摄像头权限，画面不会上传）</span></p>
   <button id="startBtn">开始探索</button>
   <button id="previewBtn">先看一眼彩蛋 →</button>
+  <p style="font-size:11px;opacity:.4;margin-top:14px">v3</p>
 </div>
 
 <div id="container"></div>
@@ -157,9 +158,31 @@ async function startAR() {
   /* 第 2 步：权限没问题再启动 MindAR（此时内部请求摄像头会秒过） */
   statusEl.textContent = '加载识别数据…（首次约几秒）';
 
+  /* 第 2 步：自己先带进度条下载识别数据（833KB），再交给 MindAR（同 URL 已在缓存） */
+  statusEl.textContent = '加载识别数据… 0%';
+  let mindUrl;
+  try {
+    const resp = await fetch('./assets/target.mind');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const total = +resp.headers.get('content-length') || 833135;
+    const reader = resp.body.getReader();
+    const chunks = []; let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); got += value.length;
+      statusEl.textContent = '加载识别数据… ' + Math.min(99, Math.round(got / total * 100)) + '%';
+    }
+    mindUrl = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
+  } catch (e) {
+    statusEl.textContent = '识别数据下载失败（' + (e && e.message || '网络错误') + '），请检查网络后刷新重试';
+    setTimeout(() => { splash.style.display = 'flex'; }, 3500);
+    return;
+  }
+
   const mindarThree = new MindARThree({
     container: document.getElementById('container'),
-    imageTargetSrc: './assets/target.mind',
+    imageTargetSrc: mindUrl,
     uiLoading: 'no', uiScanning: 'no', uiError: 'no',
     maxTrack: 1,
   });
