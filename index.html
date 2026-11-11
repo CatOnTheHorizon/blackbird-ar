@@ -6,42 +6,40 @@
 <title>黑鸟面包巴士 · 月历彩蛋</title>
 <style>
   html, body { margin:0; padding:0; width:100%; height:100%; background:#0e0e1a; overflow:hidden;
-    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; touch-action:none; }
   #container { position:fixed; inset:0; }
   video, canvas { position:absolute; top:0; left:0; }
 
   /* ── 启动页 ─────────────────────────── */
   #splash { position:fixed; inset:0; z-index:30; background:#0e0e1a; color:#f5f0e6;
-    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; padding:24px; }
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; }
   #splash h1 { font-size:22px; letter-spacing:2px; margin:0; color:#ffd34d; }
   #splash p { font-size:14px; line-height:1.8; margin:0; opacity:.85; text-align:center; }
-  #startBtn { margin-top:10px; padding:14px 44px; font-size:16px; letter-spacing:4px;
+  #splash button { width:min(72vw, 300px); }
+  #arBtn { margin-top:10px; padding:14px 20px; font-size:16px; letter-spacing:4px;
     border:none; border-radius:999px; background:#ffd34d; color:#222; font-weight:600; }
-  #previewBtn { margin-top:6px; padding:10px 30px; font-size:13px; letter-spacing:2px;
+  #vrBtn, #prevBtn { margin-top:4px; padding:11px 20px; font-size:13px; letter-spacing:2px;
     border:1px solid #555; border-radius:999px; background:transparent; color:#bbb; }
   .bird { font-size:44px; animation: flap 1.6s ease-in-out infinite; }
   @keyframes flap { 0%,100%{transform:translateY(0) rotate(-6deg)} 50%{transform:translateY(-10px) rotate(6deg)} }
 
   /* ── 状态条 ─────────────────────────── */
-  #status { position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:20;
-    background:rgba(14,14,26,.75); color:#f5f0e6; font-size:13px; letter-spacing:1px;
+  #status { position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:40;
+    max-width:86vw; text-align:center;
+    background:rgba(14,14,26,.78); color:#f5f0e6; font-size:13px; letter-spacing:1px;
     padding:8px 18px; border-radius:999px; pointer-events:none; transition:opacity .4s; }
-  #scanHint { position:fixed; top:60px; left:50%; transform:translateX(-50%); z-index:20;
+  #scanHint { position:fixed; top:60px; left:50%; transform:translateX(-50%); z-index:40;
     color:#ffd34d; font-size:15px; letter-spacing:2px; pointer-events:none; text-shadow:0 1px 6px rgba(0,0,0,.8);
-    transition:opacity .4s; }
+    transition:opacity .4s; white-space:nowrap; }
   .hidden { opacity:0 !important; }
 
-  /* ── 预览模式（无摄像头彩蛋页）───────── */
-  #preview { position:fixed; inset:0; z-index:25; background:#0e0e1a; display:none;
-    flex-direction:column; align-items:center; justify-content:center; overflow:hidden; }
-  #preview .art { position:relative; width:min(86vw, 86vh, 560px); }
-  #preview img.target { width:100%; display:block; border-radius:14px;
-    box-shadow:0 20px 60px rgba(0,0,0,.6); }
-  #preview .glow { position:absolute; inset:-30px; background:radial-gradient(circle,
-    rgba(255,211,77,.25), transparent 65%); animation: pulse 3s ease-in-out infinite; pointer-events:none; }
-  @keyframes pulse { 0%,100%{opacity:.5} 50%{opacity:1} }
-  #preview .caption { margin-top:26px; color:#f5f0e6; font-size:15px; letter-spacing:3px; text-align:center; line-height:2; }
-  #preview .caption .hl { color:#ffd34d; }
+  /* ── VR 全景模式 ────────────────────── */
+  #vrRoot { position:fixed; inset:0; z-index:20; display:none; background:#0e0e1a; }
+  #vrHint { position:fixed; bottom:34px; left:50%; transform:translateX(-50%); z-index:41;
+    color:#f5f0e6; font-size:13px; letter-spacing:2px; opacity:.75; pointer-events:none;
+    text-shadow:0 1px 6px rgba(0,0,0,.8); }
+  #vrExit { position:fixed; top:14px; right:14px; z-index:41; padding:8px 16px; font-size:13px;
+    border-radius:999px; border:1px solid #666; background:rgba(14,14,26,.6); color:#ddd; }
 </style>
 </head>
 <body>
@@ -50,28 +48,21 @@
 <div id="splash">
   <div class="bird">🐦‍⬛</div>
   <h1>黑鸟面包巴士</h1>
-  <p>2026 伊坂幸太郎月历 · 隐藏彩蛋<br>
-     点击下方按钮，把镜头对准月历上的插画<br>
-     <span style="opacity:.6">（会请求摄像头权限，画面不会上传）</span></p>
-  <button id="startBtn">开始探索</button>
-  <button id="previewBtn">先看一眼彩蛋 →</button>
-  <p style="font-size:11px;opacity:.4;margin-top:14px">v6</p>
+  <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
+  <button id="arBtn">开始 AR · 对准月历插画</button>
+  <button id="vrBtn">进入 VR 全景 · 扫码直达</button>
+  <button id="prevBtn">先看一眼彩蛋（静态）</button>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v7</p>
 </div>
 
 <div id="container"></div>
 <div id="status" class="hidden">加载中…</div>
 <div id="scanHint" class="hidden">对准月历上的「BYE BYE BLACKBIRD」插画 ✦</div>
 
-<!-- 无摄像头预览页 -->
-<div id="preview">
-  <div class="art">
-    <div class="glow"></div>
-    <img class="target" src="./assets/target.jpg" alt="月历插画">
-  </div>
-  <div class="caption">
-    要变成一块<span class="hl">好吃的面包</span>哦 🍞<br>
-    <span style="font-size:12px; opacity:.55">这是彩蛋的预览形态 · 打开摄像头扫描月历可以看到立体版</span>
-  </div>
+<!-- VR 全景模式 -->
+<div id="vrRoot">
+  <button id="vrExit">返回</button>
+  <div id="vrHint">移动手机环视四周 · 或用手指拖动画面</div>
 </div>
 
 <script type="importmap">
@@ -88,10 +79,11 @@
 import * as THREE from 'three';
 import { MindARThree } from 'mindar-image-three';
 
-const statusEl   = document.getElementById('status');
-const hintEl     = document.getElementById('scanHint');
-const splash     = document.getElementById('splash');
-const preview    = document.getElementById('preview');
+const statusEl = document.getElementById('status');
+const hintEl   = document.getElementById('scanHint');
+const splash   = document.getElementById('splash');
+const vrRoot   = document.getElementById('vrRoot');
+const vrHint   = document.getElementById('vrHint');
 
 /* 手机上看不到控制台：把未捕获错误直接显示到状态栏 */
 const showErr = (msg) => {
@@ -104,69 +96,35 @@ window.addEventListener('unhandledrejection', (e) => {
   showErr((r && (r.message || r)) || '未处理的异常');
 });
 
-document.getElementById('previewBtn').addEventListener('click', () => {
-  splash.style.display = 'none';
-  preview.style.display = 'flex';
-  buildPreviewScene();
-});
+const backToSplash = () => { splash.style.display = 'flex'; };
 
-/* ── 预览模式：把同款 three.js 动画直接叠加在插画上 ── */
-let previewBuilt = false;
-function buildPreviewScene() {
-  if (previewBuilt) return;
-  previewBuilt = true;
-  const artEl = preview.querySelector('.art');
-  const w = artEl.clientWidth, h = artEl.clientHeight;
-  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setSize(w, h);
-  renderer.domElement.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
-  artEl.appendChild(renderer.domElement);
-  const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
-  camera.position.set(0, 0, 3.2);   // 拉近，让彩蛋元素占比合适
-  const anchor = new THREE.Group();
-  scene.add(anchor);
-  buildBirdScene(anchor);
-  const clock = new THREE.Clock();
-  (function tick() {
-    const t = clock.getElapsedTime();
-    anchor.userData.animate?.(t);
-    renderer.render(scene, camera);
-    requestAnimationFrame(tick);
-  })();
-}
-
-/* ── AR 主流程 ─────────────────────────── */
-const startBtn = document.getElementById('startBtn');
-startBtn.addEventListener('click', startAR);
+/* ══════════════ 模式一：AR（对准月历插画） ══════════════ */
+document.getElementById('arBtn').addEventListener('click', startAR);
 
 async function startAR() {
   splash.style.display = 'none';
   statusEl.classList.remove('hidden');
 
-  /* 第 1 步：自己先做摄像头权限检查（MindAR 内部对权限拒绝的报错传不出来，必须自查） */
+  /* 1. 自己先做摄像头权限检查（MindAR 内部对权限拒绝的报错传不出来，必须自查） */
   statusEl.textContent = '请求摄像头权限…（请在弹窗中允许）';
   const permHint = setTimeout(() => {
     statusEl.textContent = '还在等待授权…请检查浏览器是否弹出了摄像头权限窗口，或刷新页面重试';
   }, 25000);
   let camStream = null;
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment' }
-    });
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
     clearTimeout(permHint);
-    camStream.getTracks().forEach(t => t.stop());   // 验完立刻释放
+    camStream.getTracks().forEach(t => t.stop());
   } catch (e) {
     clearTimeout(permHint);
     statusEl.textContent = e && e.name === 'NotAllowedError'
-      ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」（或点浏览器地址栏旁的摄像头图标重新允许）'
+      ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」'
       : '无法访问摄像头：' + (e && e.message || e.name || '未知错误');
-    setTimeout(() => { splash.style.display = 'flex'; }, 3000);
+    setTimeout(backToSplash, 3000);
     return;
   }
 
-  /* 第 2 步：自己先带进度条下载识别数据（833KB），再交给 MindAR（同 URL 已在缓存） */
+  /* 2. 带进度下载识别数据 */
   statusEl.textContent = '加载识别数据… 0%';
   let mindUrl;
   try {
@@ -183,11 +141,12 @@ async function startAR() {
     }
     mindUrl = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
   } catch (e) {
-    statusEl.textContent = '识别数据下载失败（' + (e && e.message || '网络错误') + '），请检查网络后刷新重试';
-    setTimeout(() => { splash.style.display = 'flex'; }, 3500);
+    statusEl.textContent = '识别数据下载失败（' + (e && e.message || '网络错误') + '），请检查网络后重试';
+    setTimeout(backToSplash, 3500);
     return;
   }
 
+  /* 3. 启动 MindAR */
   const mindarThree = new MindARThree({
     container: document.getElementById('container'),
     imageTargetSrc: mindUrl,
@@ -196,19 +155,12 @@ async function startAR() {
   });
   const { renderer, scene, camera } = mindarThree;
   const anchor = mindarThree.addAnchor(0);
-  buildBirdScene(anchor);
+  buildBirdScene(anchor);          // MindAR anchor 挂到 anchor.group（兼容预览用 Group）
 
-  /* 阶段提示：手机首次初始化可能要 10-60 秒，让用户看到进展 */
   const origVideo = mindarThree._startVideo.bind(mindarThree);
-  mindarThree._startVideo = async () => {
-    statusEl.textContent = '启动摄像头…';
-    return origVideo();
-  };
+  mindarThree._startVideo = async () => { statusEl.textContent = '启动摄像头…'; return origVideo(); };
   const origAR = mindarThree._startAR.bind(mindarThree);
-  mindarThree._startAR = async () => {
-    statusEl.textContent = '初始化识别引擎…（首次最长约 1 分钟，请稍等）';
-    return origAR();
-  };
+  mindarThree._startAR = async () => { statusEl.textContent = '初始化识别引擎…（首次最长约 1 分钟）'; return origAR(); };
 
   anchor.onTargetFound = () => {
     statusEl.textContent = '✦ 彩蛋解锁 ✦';
@@ -220,15 +172,12 @@ async function startAR() {
     hintEl.classList.remove('hidden');
   };
 
-  const startPromise = mindarThree.start();
-  const timeout = new Promise((_, rej) =>
-    setTimeout(() => rej(new Error('初始化超时（90秒）')), 90000));
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('初始化超时（90秒）')), 90000));
   try {
-    await Promise.race([startPromise, timeout]);
+    await Promise.race([mindarThree.start(), timeout]);
   } catch (e) {
-    console.error(e);
     statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
-    setTimeout(() => { splash.style.display = 'flex'; }, 4000);
+    setTimeout(backToSplash, 4000);
     return;
   }
   statusEl.classList.add('hidden');
@@ -242,79 +191,190 @@ async function startAR() {
   });
 }
 
+/* ══════════════ 模式二：VR 全景（扫码直达，无摄像头） ══════════════ */
+let vrActive = false;
+document.getElementById('vrBtn').addEventListener('click', enterVR);
+document.getElementById('prevBtn').addEventListener('click', () => enterVR(true));
+document.getElementById('vrExit').addEventListener('click', () => { vrActive = false; vrRoot.style.display = 'none'; backToSplash(); });
+
+async function enterVR(staticPreview = false) {
+  splash.style.display = 'none';
+  vrRoot.style.display = 'block';
+  vrHint.textContent = staticPreview ? '静态预览 · 手机上可环视' : '移动手机环视四周 · 或用手指拖动画面';
+  vrActive = true;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  vrRoot.insertBefore(renderer.domElement, vrRoot.firstChild);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0e0e1a);
+  const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 100);
+
+  /* 深空星点 */
+  {
+    const N = 420, pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+    const cA = new THREE.Color(0xffd34d), cB = new THREE.Color(0xf5f0e6);
+    for (let i = 0; i < N; i++) {
+      const r = 6 + Math.random() * 10, th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1);
+      pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
+      pos[i*3+1] = r * Math.cos(ph);
+      pos[i*3+2] = r * Math.sin(ph) * Math.sin(th);
+      const c = Math.random() < 0.5 ? cA : cB;
+      col[i*3] = c.r; col[i*3+1] = c.g; col[i*3+2] = c.b;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    scene.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 0.06, vertexColors: true, transparent: true, opacity: 0.85 })));
+  }
+
+  /* 月历插画卡片 + 环绕彩蛋（复用同一套 buildBirdScene） */
+  const card = new THREE.Group();
+  const tex = await new THREE.TextureLoader().loadAsync('./assets/target.jpg');
+  const art = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.3635, 1.0),
+    new THREE.MeshBasicMaterial({ map: tex })
+  );
+  card.add(art);
+  const frame = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.48, 1.115),
+    new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.25 })
+  );
+  frame.position.z = -0.01;
+  card.add(frame);
+  buildBirdScene(card);
+  scene.add(card);
+
+  /* 视角控制：陀螺仪优先，拖动兜底 */
+  let useGyro = false, gyroYaw = 0, gyroPitch = 0;
+  const setFromOrientation = (alpha, beta, gamma, orientDeg) => {
+    const deg = Math.PI / 180;
+    const euler = new THREE.Euler(beta * deg, alpha * deg, -gamma * deg, 'YXZ');
+    const q = new THREE.Quaternion().setFromEuler(euler);
+    q.multiply(new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)));
+    q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orientDeg * deg));
+    const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+    gyroYaw = e.y; gyroPitch = e.x;
+  };
+  if (!staticPreview && typeof DeviceOrientationEvent !== 'undefined') {
+    try {
+      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const p = await DeviceOrientationEvent.requestPermission();
+        useGyro = p === 'granted';
+      } else {
+        useGyro = true;
+      }
+    } catch { useGyro = false; }
+    if (useGyro) {
+      window.addEventListener('deviceorientation', (e) => {
+        if (e.alpha == null) return;
+        const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+        setFromOrientation(e.alpha, e.beta, e.gamma, orient);
+      });
+      vrHint.textContent = '移动手机环视四周 ✦';
+    }
+  }
+  let dragYaw = 0, dragPitch = 0, dragging = false, lastX = 0, lastY = 0;
+  vrRoot.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+  vrRoot.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    dragYaw   += (e.clientX - lastX) * 0.005;
+    dragPitch += (e.clientY - lastY) * 0.005;
+    dragPitch = Math.max(-1.1, Math.min(1.1, dragPitch));
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  window.addEventListener('pointerup', () => { dragging = false; });
+
+  const clock = new THREE.Clock();
+  (function tick() {
+    if (!vrActive) { renderer.dispose(); return; }
+    const t = clock.getElapsedTime();
+    card.userData.animate?.(t);
+    card.position.y = Math.sin(t * 0.8) * 0.05;
+    if (useGyro) {
+      camera.rotation.set(gyroPitch, gyroYaw, 0, 'YXZ');
+    } else {
+      camera.rotation.set(
+        dragPitch + Math.sin(t * 0.13) * 0.04,
+        dragYaw + Math.sin(t * 0.2) * 0.06, 0, 'YXZ');
+    }
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  })();
+}
+
 /* ═══════════════════════════════════════════
-   彩蛋场景（AR 与预览共用）
-   元素取自插画：黑影乌鸦 × 星星 × 面包 × 横幅
+   彩蛋场景（AR 锚点与 VR 卡片共用）
+   构图原则：乌鸦只在外圈慢速环绕，星星聚在上方天空，
+   面包留在巴士车窗 —— 不遮插画本体
    ═══════════════════════════════════════════ */
 function buildBirdScene(anchor) {
   const group = new THREE.Group();
+  const root = anchor.group || anchor;          // MindAR anchor 是普通对象，内容挂 group
+  if (!anchor.userData) anchor.userData = {};   // 普通对象补 userData
 
-  /* 1. 绕飞的乌鸦群（简单形状小鸟，纯代码建模，零外部资源） */
+  /* 1. 乌鸦 ×4：外圈慢速椭圆轨道，平滑转向 */
   const crowMat = new THREE.MeshBasicMaterial({ color: 0x111111 });
   const crows = [];
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 4; i++) {
     const crow = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.075, 0.2, 4, 8), crowMat);
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.17, 4, 8), crowMat);
     body.rotation.z = Math.PI / 2;
-    const wingL = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.24, 3), crowMat);
-    wingL.position.set(0, 0.05, 0.11); wingL.rotation.x = -0.5;
-    const wingR = wingL.clone(); wingR.position.z = -0.11; wingR.rotation.x = 0.5;
+    const wingL = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.2, 3), crowMat);
+    wingL.position.set(0, 0.04, 0.09); wingL.rotation.x = -0.5;
+    const wingR = wingL.clone(); wingR.position.z = -0.09; wingR.rotation.x = 0.5;
     crow.add(body, wingL, wingR);
-    // 每只鸟自己的椭圆轨道参数
     crow.userData = {
-      rx: 0.9 + Math.random() * 0.5, rz: 0.45 + Math.random() * 0.3,
-      speed: 0.45 + Math.random() * 0.4, phase: Math.random() * Math.PI * 2,
-      y: 0.55 + Math.random() * 0.35, size: 0.7 + Math.random() * 0.6,
+      rx: 0.75 + (i % 2) * 0.22, rz: 0.2 + (i % 2) * 0.14,
+      speed: 0.28 + i * 0.06, phase: i * Math.PI / 2 + Math.random() * 0.7,
+      y: 0.52 + i * 0.09, size: 0.8 + (i % 2) * 0.3,
     };
     crow.scale.setScalar(crow.userData.size);
     crows.push(crow);
     group.add(crow);
   }
 
-  /* 2. 闪烁星星（黄色小星，呼应插画里的星点） */
+  /* 2. 星星 ×14：聚在插画上方天空区，不铺满屏 */
   const starMat = new THREE.MeshBasicMaterial({ color: 0xffd34d });
   const stars = [];
-  for (let i = 0; i < 26; i++) {
-    const s = new THREE.Mesh(new THREE.OctahedronGeometry(0.018 + Math.random() * 0.018), starMat);
-    s.position.set((Math.random() - 0.5) * 2.4, (Math.random() - 0.5) * 1.6, -0.1);
+  for (let i = 0; i < 14; i++) {
+    const s = new THREE.Mesh(new THREE.OctahedronGeometry(0.012 + Math.random() * 0.012), starMat);
+    s.position.set((Math.random() - 0.5) * 1.8, 0.12 + Math.random() * 0.62, (Math.random() - 0.5) * 0.3);
     s.userData = { phase: Math.random() * Math.PI * 2, base: s.scale.x };
     stars.push(s);
     group.add(s);
   }
 
-  /* 3. 发光的面包（对准插画里巴士烤箱窗的位置：目标图宽归一化为 1，中心为原点） */
-  const bread = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.18, 8, 16),
+  /* 3. 发光的面包：对准插画里巴士烤箱窗的位置（目标图宽归一化为 1，中心为原点） */
+  const bread = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.16, 8, 16),
     new THREE.MeshBasicMaterial({ color: 0xe8a54b, transparent: true, opacity: 0.92 }));
   bread.position.set(-0.30, 0.05, 0.30);
   bread.rotation.z = 1.1;
   bread.scale.setScalar(0.85);
   group.add(bread);
-  const breadGlow = new THREE.Mesh(new THREE.SphereGeometry(0.34, 16, 16),
+  const breadGlow = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 16),
     new THREE.MeshBasicMaterial({ color: 0xffd34d, transparent: true, opacity: 0.16 }));
   breadGlow.position.copy(bread.position);
   group.add(breadGlow);
 
-  /* 4. 横幅文字（放在上方天空区，避免和插画自带的横幅重复） */
+  /* 4. 横幅文字：悬在插画上沿之上一点 */
   const banner = makeTextBanner('✦ 2026 黑鸟面包巴士 ✦');
-  banner.position.set(0, 0.62, 0.4);
-  banner.scale.setScalar(0.001);       // 从小到大展开
+  banner.position.set(0, 0.55, 0.35);
+  banner.scale.setScalar(0.001);
   group.add(banner);
 
-  /* MindAR 的 anchor 是普通对象 {group: THREE.Group,...}，内容要加到 group 上；
-     预览模式传入的是 THREE.Group 本身 —— 两者兼容 */
-  const root = anchor.group || anchor;
   root.add(group);
-  if (!anchor.userData) anchor.userData = {};   // 普通对象没有 userData，补上
+
   anchor.userData.animate = (t) => {
     crows.forEach((c) => {
       const u = c.userData;
-      c.position.set(
-        Math.cos(t * u.speed + u.phase) * u.rx,
-        u.y + Math.sin(t * u.speed * 2 + u.phase) * 0.08,
-        Math.sin(t * u.speed + u.phase) * u.rz
-      );
-      c.rotation.y = Math.cos(t * u.speed + u.phase) > 0 ? 0.4 : Math.PI - 0.4;
-      c.rotation.z = Math.sin(t * 6 + u.phase) * 0.5;   // 振翅
+      const th = t * u.speed + u.phase;
+      const x = Math.cos(th) * u.rx, z = Math.sin(th) * u.rz;
+      const dx = -Math.sin(th) * u.rx, dz = Math.cos(th) * u.rz;   // 速度方向
+      c.position.set(x, u.y + Math.sin(t * 1.5 + u.phase) * 0.05, z);
+      c.rotation.y = Math.atan2(dx, dz) + Math.PI / 2;              // 平滑朝向，无突变
+      c.rotation.z = Math.sin(t * 5 + u.phase) * 0.35;              // 振翅
     });
     stars.forEach((s) => {
       const k = 0.5 + 0.5 * Math.sin(t * 2.2 + s.userData.phase);
@@ -322,9 +382,9 @@ function buildBirdScene(anchor) {
       s.rotation.y = t * 1.5 + s.userData.phase;
     });
     bread.rotation.y = t * 1.2;
-    bread.position.y = 0.05 + Math.sin(t * 1.6) * 0.06;
+    bread.position.y = 0.05 + Math.sin(t * 1.6) * 0.05;
     breadGlow.position.copy(bread.position);
-    breadGlow.material.opacity = 0.12 + 0.07 * Math.sin(t * 2.4);
+    breadGlow.material.opacity = 0.12 + 0.06 * Math.sin(t * 2.4);
     const bk = Math.min(1, t * 0.5);
     banner.scale.setScalar(bk * (1 + Math.sin(t * 1.8) * 0.02));
   };
@@ -346,11 +406,10 @@ function makeTextBanner(text) {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(text, cv.width / 2, cv.height / 2 + 4);
   const tex = new THREE.CanvasTexture(cv);
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(1.9, 0.3),
+  return new THREE.Mesh(
+    new THREE.PlaneGeometry(1.6, 0.25),
     new THREE.MeshBasicMaterial({ map: tex, transparent: true })
   );
-  return mesh;
 }
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
