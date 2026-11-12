@@ -10,7 +10,6 @@
   #container { position:fixed; inset:0; }
   video, canvas { position:absolute; top:0; left:0; }
 
-  /* ── 启动页 ─────────────────────────── */
   #splash { position:fixed; inset:0; z-index:30; background:#0e0e1a; color:#f5f0e6;
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; }
   #splash h1 { font-size:22px; letter-spacing:2px; margin:0; color:#ffd34d; }
@@ -18,12 +17,11 @@
   #splash button { width:min(72vw, 300px); }
   #arBtn { margin-top:10px; padding:14px 20px; font-size:16px; letter-spacing:4px;
     border:none; border-radius:999px; background:#ffd34d; color:#222; font-weight:600; }
-  #vrBtn, #prevBtn { margin-top:4px; padding:11px 20px; font-size:13px; letter-spacing:2px;
+  #vrBtn { margin-top:4px; padding:11px 20px; font-size:13px; letter-spacing:2px;
     border:1px solid #555; border-radius:999px; background:transparent; color:#bbb; }
   .bird { font-size:44px; animation: flap 1.6s ease-in-out infinite; }
   @keyframes flap { 0%,100%{transform:translateY(0) rotate(-6deg)} 50%{transform:translateY(-10px) rotate(6deg)} }
 
-  /* ── 状态条 ─────────────────────────── */
   #status { position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:40;
     max-width:86vw; text-align:center;
     background:rgba(14,14,26,.78); color:#f5f0e6; font-size:13px; letter-spacing:1px;
@@ -33,7 +31,6 @@
     transition:opacity .4s; white-space:nowrap; }
   .hidden { opacity:0 !important; }
 
-  /* ── VR 立体场景 ────────────────────── */
   #vrRoot { position:fixed; inset:0; z-index:20; display:none; background:#0e0e1a; }
   #vrHint { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:41;
     color:#f5f0e6; font-size:13px; letter-spacing:2px; opacity:.75; pointer-events:none;
@@ -44,24 +41,22 @@
 </head>
 <body>
 
-<!-- 启动页 -->
 <div id="splash">
   <div class="bird">🐦‍⬛</div>
   <h1>黑鸟面包巴士</h1>
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
-  <button id="vrBtn">进入 VR · 立体场景</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v13</p>
+  <button id="vrBtn">进入 VR · 插画动起来</button>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v16</p>
 </div>
 
 <div id="container"></div>
 <div id="status" class="hidden">加载中…</div>
 <div id="scanHint" class="hidden">对准月历上的「BYE BYE BLACKBIRD」插画 ✦</div>
 
-<!-- VR 立体场景 -->
 <div id="vrRoot">
   <button id="vrExit">返回</button>
-  <div id="vrHint">拖动旋转场景 · 手机上可移动环视</div>
+  <div id="vrHint">拖动画面环视 · 手机上可移动观看</div>
 </div>
 
 <script type="importmap">
@@ -78,7 +73,6 @@
 import * as THREE from 'three';
 import { MindARThree } from 'mindar-image-three';
 
-/* 修正色彩：hex 颜色按 sRGB 解释，避免发白 */
 THREE.ColorManagement.legacyMode = false;
 
 const statusEl = document.getElementById('status');
@@ -87,7 +81,6 @@ const splash   = document.getElementById('splash');
 const vrRoot   = document.getElementById('vrRoot');
 const vrHint   = document.getElementById('vrHint');
 
-/* 手机上看不到控制台：把未捕获错误直接显示到状态栏 */
 const showErr = (msg) => {
   statusEl.classList.remove('hidden');
   statusEl.textContent = '⚠ ' + String(msg).slice(0, 120);
@@ -99,14 +92,226 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 const backToSplash = () => { splash.style.display = 'flex'; };
 
-/* ══════════════ 模式一：AR（对准月历插画，立体场景生在图上方） ══════════════ */
+/* ══════════ 原画贴片场景（AR / VR 共用） ══════════ */
+const UNIT = 1 / 1745;                    // 目标图宽归一化为 1
+const pxX = (px) => (px / 1745 - 0.5);
+const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
+let ART_META = null;
+let ART_TEX = null;
+
+async function loadArtAssets() {
+  if (ART_META) return;
+  const meta = await (await fetch('./assets/sprites/meta.json')).json();
+  const loader = new THREE.TextureLoader();
+  const names = ['bus', 'bird1', 'bird2', 'bird3', 'bird4', 'bird6', 'sign', 'bench', 'wheel0', 'wheel1'];
+  const tex = {};
+  await Promise.all(names.map(async (n) => {
+    const t = await loader.loadAsync('./assets/sprites/' + n + '.png');
+    t.encoding = THREE.sRGBEncoding;
+    t.minFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    tex[n] = t;
+  }));
+  ART_META = meta;
+  ART_TEX = tex;
+}
+
+function spriteMesh(name, meta, tex, z = 0) {
+  const [x0, y0, x1, y1] = meta.rects[name];
+  const w = (x1 - x0) * UNIT, h = (y1 - y0) * UNIT;
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex[name], transparent: true, depthWrite: false })
+  );
+  m.position.set(pxX((x0 + x1) / 2), pxY((y0 + y1) / 2), z);
+  return m;
+}
+
+/* 四角星闪光贴图（原画风格的星点） */
+function sparkleTexture(color = '#fff6d8') {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 128;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 26);
+  g.addColorStop(0, color);
+  g.addColorStop(1, 'rgba(255,246,216,0)');
+  ctx.fillStyle = g;
+  /* 四角星形 */
+  ctx.beginPath();
+  ctx.moveTo(64, 6);
+  ctx.quadraticCurveTo(70, 56, 122, 64);
+  ctx.quadraticCurveTo(70, 72, 64, 122);
+  ctx.quadraticCurveTo(58, 72, 6, 64);
+  ctx.quadraticCurveTo(58, 56, 64, 6);
+  ctx.fill();
+  const t = new THREE.CanvasTexture(cv);
+  t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
+/* 天空渐变平面（取自原画采样色） */
+function skyPlane(stops) {
+  const cv = document.createElement('canvas');
+  cv.width = 8; cv.height = 512;
+  const ctx = cv.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, 512);
+  stops.forEach((c, i) => g.addColorStop(i / (stops.length - 1), c));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 8, 512);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.encoding = THREE.sRGBEncoding;
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(8.0, 6.5),
+    new THREE.MeshBasicMaterial({ map: tex })
+  );
+  m.position.set(0, 0.3, -3.6);
+  return m;
+}
+
+function createArtScene(meta, tex, opts = {}) {
+  const { withSky = false, driveFromZ = -2.4 } = opts;
+  const group = new THREE.Group();
+  const animatables = [];
+
+  if (withSky) group.add(skyPlane(meta.skyStops));
+
+  /* —— 星星（闪烁） —— */
+  const sparkTex = sparkleTexture();
+  const stars = [];
+  for (let i = 0; i < 24; i++) {
+    const s = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.055, 0.055),
+      new THREE.MeshBasicMaterial({ map: sparkTex, transparent: true, depthWrite: false, opacity: 0.9 })
+    );
+    s.position.set((Math.random() - 0.5) * 1.1,
+                   -0.02 + Math.random() * 0.45,
+                   -1.0 + Math.random() * 0.45);
+    s.userData = { ph: Math.random() * Math.PI * 2, base: 0.5 + Math.random() * 0.8 };
+    stars.push(s);
+    group.add(s);
+  }
+
+  /* —— 站牌（绕底部支点轻摆） —— */
+  const signZ = 0.012;
+  const signGroup = new THREE.Group();
+  {
+    const [x0, y0, x1, y1] = meta.rects.sign;
+    const sign = spriteMesh('sign', meta, tex, 0);
+    const px = pxX((x0 + x1) / 2), pyBottom = pxY(y1);
+    signGroup.position.set(px, pyBottom, signZ);
+    sign.position.set(0, (pxY((y0 + y1) / 2) - pyBottom), 0);
+    signGroup.add(sign);
+    group.add(signGroup);
+  }
+
+  /* —— 长椅 —— */
+  const bench = spriteMesh('bench', meta, tex, 0.02);
+  group.add(bench);
+
+  /* —— 面包巴士（整体悬浮/驶入），车轮独立旋转 —— */
+  const busGroup = new THREE.Group();
+  const bus = spriteMesh('bus', meta, tex, 0);
+  busGroup.add(bus);
+  const wheels = [];
+  meta.wheels.forEach(([wx, wy, wr], i) => {
+    const wm = new THREE.Mesh(
+      new THREE.PlaneGeometry(2 * wr * UNIT, 2 * wr * UNIT),
+      new THREE.MeshBasicMaterial({ map: tex['wheel' + i], transparent: true, depthWrite: false })
+    );
+    /* 车轮位置 = 巴士贴片的局部坐标 + 车轮相对巴士中心的偏移 */
+    const [bx0, by0, bx1, by1] = meta.rects.bus;
+    wm.position.set(bus.position.x + (wx - (bx0 + bx1) / 2) * UNIT,
+                    bus.position.y + ((by0 + by1) / 2 - wy) * UNIT,
+                    0.004);
+    busGroup.add(wm);
+    wheels.push(wm);
+  });
+  busGroup.position.z = -0.04;
+  group.add(busGroup);
+
+  /* —— 鸟群 —— */
+  const birds = [];
+  const birdDefs = [
+    { name: 'bird1', z: 0.045, phase: 0.0 },
+    { name: 'bird2', z: 0.046, phase: 1.3 },
+    { name: 'bird3', z: 0.047, phase: 2.4 },
+    { name: 'bird4', z: 0.048, phase: 3.1 },
+    { name: 'bird6', z: 0.049, phase: 4.2 },
+  ];
+  birdDefs.forEach((d) => {
+    const m = spriteMesh(d.name, meta, tex, d.z);
+    const base = m.position.clone();
+    m.userData = { baseY: base.y, phase: d.phase, baseRot: 0 };
+    birds.push(m);
+    group.add(m);
+  });
+
+  /* —— 驶入状态 —— */
+  const busRest = new THREE.Vector3(0, 0, -0.04);
+  const busFar = new THREE.Vector3(0, 0.14, driveFromZ);
+  let drive = null, wheelAngle = 0, lastT = 0;
+
+  const animate = (t) => {
+    const dt = Math.min(0.05, Math.max(0, t - lastT));
+    lastT = t;
+
+    /* 巴士 */
+    let driving = false, driveK = 1;
+    if (drive) {
+      const p = Math.min(1, Math.max(0, (t - drive.t0) / 2.1));
+      driveK = p;
+      if (p < 1) {
+        driving = true;
+        const e = 1 - Math.pow(1 - p, 3);
+        busGroup.position.lerpVectors(busFar, busRest, e);
+        busGroup.position.y += Math.sin(p * Math.PI) * 0.05;
+        busGroup.rotation.z = (1 - e) * -0.12;
+        busGroup.rotation.x = 0;
+      } else {
+        drive = null;
+        busGroup.position.copy(busRest);
+        busGroup.rotation.set(0, 0, 0);
+      }
+    }
+    if (!driving) {
+      busGroup.position.y = busRest.y + Math.sin(t * 1.1) * 0.008;
+      busGroup.rotation.z = Math.sin(t * 0.8) * 0.006;
+    }
+    const wheelSpeed = driving ? (12 + (1 - driveK) * 14) : 1.2;
+    wheelAngle -= wheelSpeed * dt;
+    wheels.forEach(w => { w.rotation.z = wheelAngle; });
+
+    /* 鸟群 */
+    const excite = 1 + (1 - driveK) * 1.1;
+    birds.forEach(b => {
+      const ph = b.userData.phase;
+      const hop = Math.pow(Math.max(0, Math.sin(t * 0.9 * excite + ph * 2)), 22) * 0.016;
+      b.position.y = b.userData.baseY + Math.abs(Math.sin(t * 0.55 * excite + ph)) * 0.0035 + hop;
+      b.rotation.z = Math.sin(t * 0.5 * excite + ph) * 0.012;
+    });
+
+    /* 站牌轻摆 */
+    signGroup.rotation.z = Math.sin(t * 0.7) * 0.010;
+
+    /* 星星闪烁 */
+    stars.forEach(s => {
+      const k = 0.5 + 0.5 * Math.sin(t * 2.2 + s.userData.ph);
+      s.scale.setScalar(0.5 + k * s.userData.base);
+      s.material.opacity = 0.35 + k * 0.6;
+    });
+  };
+
+  const startDriveIn = (t0) => { drive = { t0: t0 == null ? 0 : t0 }; };
+
+  return { group, animate, startDriveIn };
+}
+
+/* ══════════ AR 模式 ══════════ */
 document.getElementById('arBtn').addEventListener('click', startAR);
 
 async function startAR() {
   splash.style.display = 'none';
   statusEl.classList.remove('hidden');
 
-  /* 1. 摄像头权限预检（MindAR 内部错误传不出来，必须自查） */
   statusEl.textContent = '请求摄像头权限…（请在弹窗中允许）';
   const permHint = setTimeout(() => {
     statusEl.textContent = '还在等待授权…请检查浏览器是否弹出了摄像头权限窗口，或刷新页面重试';
@@ -125,7 +330,15 @@ async function startAR() {
     return;
   }
 
-  /* 2. 带进度下载识别数据 */
+  statusEl.textContent = '加载插画素材…';
+  try {
+    await loadArtAssets();
+  } catch (e) {
+    statusEl.textContent = '插画素材加载失败：' + (e && e.message || e);
+    setTimeout(backToSplash, 3500);
+    return;
+  }
+
   statusEl.textContent = '加载识别数据… 0%';
   let mindUrl;
   try {
@@ -147,7 +360,6 @@ async function startAR() {
     return;
   }
 
-  /* 3. 启动 MindAR */
   const mindarThree = new MindARThree({
     container: document.getElementById('container'),
     imageTargetSrc: mindUrl,
@@ -156,15 +368,11 @@ async function startAR() {
   });
   const { renderer, scene, camera } = mindarThree;
   const anchor = mindarThree.addAnchor(0);
-  const anchorRoot = anchor.group || anchor;   // MindAR anchor 是普通对象，内容挂 .group
+  const anchorRoot = anchor.group || anchor;
 
-  /* 立体场景缩到约月历图宽度，浮在图上 */
-  const dio = createDiorama();
-  const holder = new THREE.Group();
-  holder.scale.setScalar(0.42);
-  holder.position.set(-0.06, -0.02, 0.10);
-  holder.add(dio.group);
-  anchorRoot.add(holder);
+  const art = createArtScene(ART_META, ART_TEX, { withSky: false, driveFromZ: -0.9 });
+  art.group.position.z = 0.01;
+  anchorRoot.add(art.group);
 
   const origVideo = mindarThree._startVideo.bind(mindarThree);
   mindarThree._startVideo = async () => { statusEl.textContent = '启动摄像头…'; return origVideo(); };
@@ -196,21 +404,19 @@ async function startAR() {
   let driveStarted = false;
   renderer.setAnimationLoop(() => {
     const t = clock.getElapsedTime();
-    /* 识别到月历的第一刻：巴士从远处驶来 */
     if (!driveStarted && anchor.visible) {
-      dio.startDriveIn(t + 0.1);
+      art.startDriveIn(t + 0.1);
       driveStarted = true;
     }
-    dio.animate(t);
+    art.animate(t);
     renderer.render(scene, camera);
   });
 }
 
-/* ══════════════ 模式二：VR（可环视的立体场景，无摄像头） ══════════════ */
+/* ══════════ VR 模式 ══════════ */
 let vrActive = false;
-let vrState = null;          // { turntable, dio, renderer, scene, camera }
-let yaw = 0, pitch = 0, lastInteract = 0;
-let gyroBase = null, gyroYaw = 0, gyroReady = false;
+let vrState = null;
+let yawT = 0, pitchT = 0, lastInteract = 0, gyroBase = null, gyroOff = 0;
 
 document.getElementById('vrBtn').addEventListener('click', () => enterVR(false));
 document.getElementById('vrExit').addEventListener('click', () => {
@@ -223,29 +429,24 @@ document.getElementById('vrExit').addEventListener('click', () => {
   backToSplash();
 });
 
-/* 拖动旋转（全局监听一次，靠 vrActive 开关） */
-vsListen();
-function vsListen() {
+/* 拖动 / 陀螺仪（全局监听一次） */
+{
   let dragging = false, lastX = 0, lastY = 0;
   vrRoot.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
   vrRoot.addEventListener('pointermove', (e) => {
     if (!dragging || !vrActive) return;
-    yaw   += (e.clientX - lastX) * 0.006;
-    pitch += (e.clientY - lastY) * 0.004;
-    pitch = Math.max(-0.35, Math.min(0.55, pitch));
+    yawT   = Math.max(-0.5, Math.min(0.5, yawT + (e.clientX - lastX) * 0.004));
+    pitchT = Math.max(-0.18, Math.min(0.22, pitchT - (e.clientY - lastY) * 0.003));
     lastX = e.clientX; lastY = e.clientY;
     lastInteract = performance.now();
   });
   window.addEventListener('pointerup', () => { dragging = false; });
-
-  /* 陀螺仪：转动手机 → 场景跟着转（iOS 需在点击手势里授权） */
   window.addEventListener('deviceorientation', (e) => {
     if (!vrActive || e.alpha == null) return;
     if (gyroBase == null) gyroBase = e.alpha;
     let d = e.alpha - gyroBase;
     d = ((d + 540) % 360) - 180;
-    gyroYaw = -d * Math.PI / 180;
-    gyroReady = true;
+    gyroOff = -d * Math.PI / 180 * 0.8;
   });
 }
 
@@ -253,20 +454,23 @@ async function enterVR(auto = false) {
   splash.style.display = 'none';
   vrRoot.style.display = 'block';
   vrActive = true;
-  yaw = 0; pitch = 0; lastInteract = performance.now();
-  gyroBase = null; gyroYaw = 0; gyroReady = false;
+  yawT = 0; pitchT = 0; gyroBase = null; gyroOff = 0;
+  lastInteract = performance.now();
+  vrHint.textContent = '拖动画面环视 · 手机上可移动观看';
 
-  /* iOS 13+ 陀螺仪需要用户手势授权；自动进入（扫码深链）没有手势，退回拖动模式 */
   if (!auto && typeof DeviceOrientationEvent !== 'undefined'
       && typeof DeviceOrientationEvent.requestPermission === 'function') {
     try {
       const p = await DeviceOrientationEvent.requestPermission();
-      vrHint.textContent = p === 'granted'
-        ? '转动手机环视 · 也可拖动'
-        : '拖动旋转场景';
-    } catch { vrHint.textContent = '拖动旋转场景'; }
-  } else {
-    vrHint.textContent = '拖动旋转场景 · 手机上可移动环视';
+      if (p === 'granted') vrHint.textContent = '转动手机环视 · 也可拖动';
+    } catch {}
+  }
+
+  try {
+    await loadArtAssets();
+  } catch (e) {
+    showErr('插画素材加载失败：' + (e && e.message || e));
+    return;
   }
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -276,17 +480,15 @@ async function enterVR(auto = false) {
   vrRoot.insertBefore(renderer.domElement, vrRoot.firstChild);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x141224);
+  scene.background = new THREE.Color(0x201b33);
   const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 100);
+  let camDist = 2.4;
 
-  /* 取景自适应：在任何屏幕比例下整个场景（含站牌、星区）都完整可见 */
   const fitCamera = () => {
     const tanV = Math.tan((camera.fov * Math.PI / 180) / 2);
     const aspect = innerWidth / innerHeight;
-    const halfW = 1.06, halfH = 1.02;          // 场景内容半宽/半高（居中后）
-    const d = Math.max(halfW / (tanV * aspect), halfH / tanV) * 1.18;
-    camera.position.set(0, 0.16, d);
-    camera.lookAt(0, 0.02, 0);
+    const halfW = 0.56, halfH = 0.40;
+    camDist = Math.max(halfW / (tanV * aspect), halfH / tanV) * 1.06;
   };
   fitCamera();
   window.addEventListener('resize', () => {
@@ -297,384 +499,43 @@ async function enterVR(auto = false) {
     fitCamera();
   });
 
-  /* 渐变天空（呼应插画：紫 → 桃 → 淡蓝） */
-  scene.add(makeSky());
-  /* 远星 */
-  scene.add(makeFarStars());
+  const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromZ: -2.4 });
+  scene.add(art.group);
+  art.startDriveIn(1.0);
 
-  /* 转台：立体场景放上面，拖动/陀螺仪旋转它（内容居中，绕中心转） */
-  const turntable = new THREE.Group();
-  const dio = createDiorama();
-  dio.group.position.set(-0.20, -0.49, 0);   // 内容居中到原点
-  dio.startDriveIn(0.8);                      // 进入 VR 后 0.8 秒，巴士由远及近驶来
-  turntable.add(dio.group);
-  scene.add(turntable);
-
-  vrState = { turntable, dio, renderer, scene, camera };
+  vrState = { renderer, scene, camera };
+  window.__dbg = { scene, art };
 
   const clock = new THREE.Clock();
+  let yaw = 0, pitch = 0;
   (function tick() {
     if (!vrActive) { renderer.dispose(); return; }
     const t = clock.getElapsedTime();
-    dio.animate(t);
-    /* 空闲 4 秒后缓慢自动旋转，有操作即停 */
-    if (performance.now() - lastInteract > 4000) {
-      turntable.rotation.y += 0.0022;
-    } else {
-      turntable.rotation.y = yaw + (gyroReady ? gyroYaw : 0);
-      turntable.rotation.x = pitch;
-    }
+    art.animate(t);
+
+    /* 相机：小角度环绕（纸偶剧场的视差）+ 缓慢呼吸漂移 */
+    const idle = performance.now() - lastInteract > 3000;
+    const breatheY = idle ? Math.sin(t * 0.22) * 0.035 : 0;
+    const breatheX = idle ? Math.sin(t * 0.17) * 0.012 : 0;
+    const ty = yawT + gyroOff * 0.5 + breatheY;
+    const tp = pitchT + breatheX;
+    yaw += (ty - yaw) * 0.08;
+    pitch += (tp - pitch) * 0.08;
+
+    const cy0 = -0.05;   // 内容垂直中心
+    camera.position.set(
+      Math.sin(yaw) * Math.cos(pitch) * camDist,
+      Math.sin(pitch) * camDist + cy0,
+      Math.cos(yaw) * Math.cos(pitch) * camDist
+    );
+    camera.lookAt(0, cy0, 0);
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
   })();
 }
 
-/* 二维码深链：?mode=vr 扫码直接进 VR（iOS 无手势授权，自动落拖动模式） */
 if (new URLSearchParams(location.search).get('mode') === 'vr') {
   enterVR(true);
-}
-
-/* ═══════════════════════════════════════════════════════════
-   立体场景（AR / VR 共用）：悬浮的面包巴士 + 长椅鸟群 + 站牌
-   全部由基础几何体搭建，配色取自插画
-   ═══════════════════════════════════════════════════════════ */
-function createDiorama() {
-  const group = new THREE.Group();
-
-  /* ── 调色板（取自插画） ── */
-  const C = {
-    teal: 0x7cc9b8, tealDark: 0x4f9d8f, cream: 0xf2efdf, creamDark: 0xe2d9c0,
-    wheel: 0xc0504a, hub: 0xf2efdf, winGlow: 0xffdf8e, bread: 0xf0c060,
-    wood: 0xd9a05b, woodDark: 0xb97f42, black: 0x161616, gold: 0xf5d34c,
-    red: 0xc9503c, sky: 0x141224,
-  };
-  const mat = (c, o = {}) => new THREE.MeshBasicMaterial({ color: c, ...o });
-  const mesh = (geo, c, o) => new THREE.Mesh(geo, mat(c, o));
-  const tex = (w, h, draw) => {
-    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-    draw(cv.getContext('2d'), w, h);
-    const t = new THREE.CanvasTexture(cv);
-    t.encoding = THREE.sRGBEncoding;
-    return t;
-  };
-  const textPlane = (text, { w = 0.3, h = 0.08, bg = '#c9503c', fg = '#f5efdc', font = 'bold 40px sans-serif' } = {}) => {
-    const t = tex(512, Math.round(512 * h / w), (ctx, W, H) => {
-      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = fg;
-      let size = Math.round(H * 0.62);
-      ctx.font = font.replace(/\d+px/, size + 'px');
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      /* 自适应字号：保证文字完整放得下，不裁切 */
-      while (ctx.measureText(text).width > W * 0.92 && size > 8) {
-        size -= 2;
-        ctx.font = font.replace(/\d+px/, size + 'px');
-      }
-      ctx.fillText(text, W / 2, H / 2 + H * 0.03);
-    });
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
-      new THREE.MeshBasicMaterial({ map: t, transparent: true }));
-    return m;
-  };
-
-  /* ══════ 1. 面包巴士（悬浮，轮子转，车窗发光，面包转动） ══════ */
-  const bus = new THREE.Group();
-  bus.position.set(-0.30, 0.12, 0);
-
-  const body = mesh(new THREE.BoxGeometry(0.95, 0.40, 0.44), C.teal); bus.add(body);
-  const roof = mesh(new THREE.BoxGeometry(0.97, 0.09, 0.46), C.cream); roof.position.y = 0.235; bus.add(roof);
-  const skirt = mesh(new THREE.BoxGeometry(0.97, 0.11, 0.45), C.creamDark); skirt.position.y = -0.165; bus.add(skirt);
-
-  /* 烤箱车窗（正面）：暖光 + 面包 */
-  const winFrame = mesh(new THREE.PlaneGeometry(0.58, 0.28), C.tealDark);
-  winFrame.position.set(-0.06, 0.035, 0.2205); bus.add(winFrame);
-  const winGlow = mesh(new THREE.PlaneGeometry(0.52, 0.23), C.winGlow, { transparent: true, opacity: 0.7 });
-  winGlow.position.set(-0.06, 0.035, 0.222); bus.add(winGlow);
-  const bread = mesh(new THREE.CapsuleGeometry(0.062, 0.17, 6, 12), C.bread);
-  bread.rotation.z = Math.PI / 2;
-  bread.position.set(-0.06, 0.02, 0.235); bus.add(bread);
-  /* 窗框竖条 */
-  for (const bx of [-0.20, 0.06]) {
-    const bar = mesh(new THREE.BoxGeometry(0.012, 0.25, 0.008), C.cream);
-    bar.position.set(bx + 0.06, 0.035, 0.226); bus.add(bar);
-  }
-  /* 车顶的字典 */
-  const dict = new THREE.Group();
-  dict.add(mesh(new THREE.BoxGeometry(0.18, 0.06, 0.13), C.gold));
-  const pages = mesh(new THREE.BoxGeometry(0.16, 0.045, 0.115), 0xfbf7ea);
-  pages.position.set(0.005, 0.002, 0.012); dict.add(pages);
-  dict.position.set(-0.30, 0.295, 0.05); dict.rotation.y = -0.28; bus.add(dict);
-
-  /* 车头红色铭牌 BYE BYE BLACKBIRD + 两个仪表盘 */
-  const plate = textPlane('BYE BYE BLACKBIRD', { w: 0.30, h: 0.07, bg: '#c9503c', fg: '#f5efdc', font: 'bold 40px sans-serif' });
-  plate.position.set(0.275, 0.135, 0.2215); bus.add(plate);
-  const dial1 = mesh(new THREE.CircleGeometry(0.042, 24), 0xfbf7ea); dial1.position.set(0.29, 0.025, 0.221); bus.add(dial1);
-  const dial2 = mesh(new THREE.CircleGeometry(0.030, 24), 0xfbf7ea); dial2.position.set(0.29, -0.075, 0.221); bus.add(dial2);
-
-  /* 车轮（转；加两条胎面条纹让转动可见） */
-  const wheels = [];
-  for (const [wx, wz] of [[-0.32, 0.235], [0.32, 0.235], [-0.32, -0.235], [0.32, -0.235]]) {
-    const wg = new THREE.Group();
-    const tire = mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.06, 20), C.wheel);
-    tire.rotation.z = Math.PI / 2;
-    const hub = mesh(new THREE.CylinderGeometry(0.028, 0.028, 0.064, 12), C.hub);
-    hub.rotation.z = Math.PI / 2;
-    wg.add(tire, hub);
-    /* 胎面提花纹：随车轮转动的可见条纹 */
-    const stripeA = mesh(new THREE.BoxGeometry(0.062, 0.014, 0.014), C.hub);
-    stripeA.position.set(0, 0.082, 0);
-    const stripeB = stripeA.clone(); stripeB.position.set(0, -0.082, 0);
-    wg.add(stripeA, stripeB);
-    wg.position.set(wx, -0.245, wz);
-    bus.add(wg); wheels.push(wg);
-  }
-  group.add(bus);
-
-  /* ══════ 2. 木长椅 + 等车的鸟群 ══════ */
-  const bench = new THREE.Group();
-  bench.position.set(0.03, -0.42, 0.30);
-  const slatTop = mesh(new THREE.BoxGeometry(1.44, 0.05, 0.17), C.wood); slatTop.position.set(0, -0.005, 0.03);
-  const slatLow = mesh(new THREE.BoxGeometry(1.44, 0.045, 0.12), C.woodDark); slatLow.position.set(0, -0.085, 0.0);
-  bench.add(slatTop, slatLow);
-  for (const lx of [-0.56, 0.56]) {
-    const leg = mesh(new THREE.BoxGeometry(0.07, 0.15, 0.05), 0x2a2622);
-    leg.position.set(lx, -0.075, 0.01); bench.add(leg);
-  }
-  group.add(bench);
-
-  /* 单只鸟：身体/头/喙/尾/双翅（翅膀绕肩枢轴扇动） */
-  function makeBird(s = 1) {
-    const g = new THREE.Group();
-    const bodyM = mesh(new THREE.SphereGeometry(0.075, 12, 10), C.black);
-    bodyM.scale.set(0.95, 1.18, 0.85);
-    const head = mesh(new THREE.SphereGeometry(0.048, 12, 10), C.black);
-    head.position.set(0, 0.135, 0.028);
-    const beak = mesh(new THREE.ConeGeometry(0.017, 0.055, 8), 0x26201c);
-    beak.rotation.x = Math.PI / 2; beak.position.set(0, 0.132, 0.088);
-    /* 白色眼点：让剪影里有鸟的辨识度 */
-    const eyeL = mesh(new THREE.SphereGeometry(0.0095, 6, 6), 0xf5efe0);
-    eyeL.position.set(-0.019, 0.148, 0.055);
-    const eyeR = eyeL.clone(); eyeR.position.x = 0.019;
-    const tail = mesh(new THREE.ConeGeometry(0.028, 0.09, 6), C.black);
-    tail.rotation.x = -(Math.PI / 2 + 0.42); tail.position.set(0, -0.015, -0.10);
-    const pivotL = new THREE.Group(); pivotL.position.set(-0.062, 0.03, 0);
-    const wingL = mesh(new THREE.SphereGeometry(0.052, 10, 8), C.black);
-    wingL.scale.set(0.36, 0.95, 0.55); wingL.position.set(-0.022, -0.01, 0);
-    pivotL.add(wingL);
-    const pivotR = new THREE.Group(); pivotR.position.set(0.062, 0.03, 0);
-    const wingR = mesh(new THREE.SphereGeometry(0.052, 10, 8), C.black);
-    wingR.scale.set(0.36, 0.95, 0.55); wingR.position.set(0.022, -0.01, 0);
-    pivotR.add(wingR);
-    g.add(bodyM, head, beak, eyeL, eyeR, tail, pivotL, pivotR);
-    g.scale.setScalar(s);
-    return { group: g, head, pivotL, pivotR };
-  }
-
-  const birds = [];
-  const defs = [
-    { x: -0.60, s: 1.00, ry: 0.15 },
-    { x: -0.31, s: 0.90, ry: -0.10 },
-    { x: 0.00, s: 1.06, ry: 0.05 },
-    { x: 0.34, s: 0.88, ry: -0.12 },
-    { x: 0.62, s: 1.02, ry: 0.10 },
-  ];
-  defs.forEach((d, i) => {
-    const b = makeBird(d.s);
-    b.group.position.set(d.x, 0.075, 0.02);
-    b.group.rotation.y = d.ry;
-    bench.add(b.group);
-    birds.push({ ...b, baseY: 0.075, phase: i * 1.3, speed: 0.9 + i * 0.13 });
-  });
-
-  /* 鸟的道具：枫叶 / 115 牌 / 红书包 / 横幅 */
-  const leaf = mesh(new THREE.ConeGeometry(0.035, 0.05, 3), 0xc9503c);
-  leaf.position.set(-0.085, 0.13, 0.02); leaf.rotation.z = 0.6;
-  birds[0].group.add(leaf);
-
-  const pad115 = textPlane('115', { w: 0.10, h: 0.055, bg: '#f5efdc', fg: '#222', font: 'bold 40px sans-serif' });
-  pad115.position.set(0, 0.205, 0.01); birds[2].group.add(pad115);
-
-  const bag = mesh(new THREE.BoxGeometry(0.055, 0.065, 0.03), 0xc9503c);
-  bag.position.set(0.07, 0.02, 0.045); birds[3].group.add(bag);
-
-  /* 横幅（第 4、5 只鸟之间举着）：两根杆 + 布面文字，整体轻摆 */
-  const banner = new THREE.Group();
-  banner.position.set(-0.14, 0.02, 0.02);          // 相对第 5 只鸟，落到两只鸟之间
-  const bannerCloth = textPlane('要变成一块好吃的面包哦', {
-    w: 0.52, h: 0.09, bg: '#f5efdc', fg: '#2a2622', font: 'bold 40px sans-serif',
-  });
-  bannerCloth.position.set(0, 0.36, 0.015);
-  const stickA = mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.32, 6), C.woodDark);
-  stickA.position.set(-0.26, 0.19, 0.015);
-  const stickB = stickA.clone(); stickB.position.x = 0.26;
-  banner.add(bannerCloth, stickA, stickB);
-  birds[4].group.add(banner);
-
-  /* ══════ 3. 公交站牌（随风轻摆） ══════ */
-  const stop = new THREE.Group();
-  stop.position.set(0.95, 0.02, 0.05);
-  const pole = mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.95, 10), C.woodDark);
-  pole.position.y = 0.02; stop.add(pole);
-  const disc = mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.028, 32), C.gold);
-  disc.rotation.x = Math.PI / 2; disc.position.y = 0.44; stop.add(disc);
-  const rim = mesh(new THREE.TorusGeometry(0.25, 0.013, 8, 40), C.red);
-  rim.position.y = 0.44; stop.add(rim);
-  /* 乌鸦剪影（画在贴图上） */
-  const crowTex = tex(256, 256, (ctx, W, H) => {
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = '#151515'; ctx.strokeStyle = '#151515';
-    ctx.beginPath(); ctx.ellipse(W * 0.52, H * 0.62, W * 0.24, H * 0.17, -0.35, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(W * 0.33, H * 0.36, W * 0.082, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(W * 0.26, H * 0.33); ctx.lineTo(W * 0.155, H * 0.375); ctx.lineTo(W * 0.26, H * 0.41); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(W * 0.72, H * 0.60); ctx.lineTo(W * 0.94, H * 0.70); ctx.lineTo(W * 0.70, H * 0.75); ctx.fill();
-    ctx.lineWidth = W * 0.022;
-    ctx.beginPath(); ctx.moveTo(W * 0.47, H * 0.78); ctx.lineTo(W * 0.45, H * 0.92); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(W * 0.57, H * 0.78); ctx.lineTo(W * 0.57, H * 0.92); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(W * 0.40, H * 0.92); ctx.lineTo(W * 0.49, H * 0.92); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(W * 0.53, H * 0.92); ctx.lineTo(W * 0.62, H * 0.92); ctx.stroke();
-  });
-  const crowIcon = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.36),
-    new THREE.MeshBasicMaterial({ map: crowTex, transparent: true }));
-  crowIcon.position.set(0, 0.44, 0.017); stop.add(crowIcon);
-  const stopPlate = textPlane('BUS STATION', { w: 0.44, h: 0.115, bg: '#c9503c', fg: '#f5efdc', font: 'bold 40px sans-serif' });
-  stopPlate.position.set(0, 0.10, 0.02); stop.add(stopPlate);
-  group.add(stop);
-
-  /* ══════ 4. 星星（闪烁） ══════ */
-  const stars = [];
-  for (let i = 0; i < 16; i++) {
-    const s = mesh(new THREE.OctahedronGeometry(0.014 + Math.random() * 0.012), i % 4 ? C.gold : 0xf5efe0);
-    s.position.set((Math.random() - 0.5) * 2.6, 0.30 + Math.random() * 1.15, (Math.random() - 0.5) * 1.1);
-    s.userData = { ph: Math.random() * Math.PI * 2, base: 1 };
-    stars.push(s); group.add(s);
-  }
-
-  group.position.y = 0.02;
-
-  /* ══════ 动画总控 ══════ */
-  /* 巴士停靠位 / 远处出发点（由远及近驶入） */
-  const busRest = new THREE.Vector3(-0.30, 0.12, 0);
-  const busFar  = new THREE.Vector3(-1.05, 0.34, -2.6);
-  let drive = null;          // { t0 }
-  let wheelAngle = 0;
-  let lastT = 0;
-
-  const animate = (t) => {
-    const dt = Math.min(0.05, Math.max(0, t - lastT));
-    lastT = t;
-
-    /* —— 巴士行驶状态机 —— */
-    let driving = false, driveK = 1;
-    if (drive) {
-      const p = Math.min(1, Math.max(0, (t - drive.t0) / 2.4));
-      driveK = p;
-      if (p < 1) {
-        driving = true;
-        const e = 1 - Math.pow(1 - p, 3);                    // easeOutCubic：先快后慢
-        bus.position.lerpVectors(busFar, busRest, e);
-        bus.position.y += Math.sin(p * Math.PI) * 0.14;      // 中途微微跃起
-        bus.rotation.y = (1 - e) * 0.55;                     // 车头先侧向远处
-        bus.rotation.z = Math.sin(p * Math.PI) * 0.05;
-        bus.rotation.x = 0;
-      } else {
-        drive = null;
-        bus.rotation.y = 0; bus.rotation.x = 0; bus.rotation.z = 0;
-        bus.position.copy(busRest);
-      }
-    }
-    if (!driving) {
-      /* 停稳后的悬浮呼吸 */
-      bus.position.y = 0.12 + Math.sin(t * 1.1) * 0.035;
-      bus.rotation.z = Math.sin(t * 0.8) * 0.018;
-      bus.rotation.x = Math.sin(t * 0.55) * 0.012;
-    }
-
-    /* 车轮：行驶时飞速转并平滑收速，停靠时慢转 */
-    const wheelSpeed = driving ? (1.6 + (1 - driveK) * 16) : 1.6;
-    wheelAngle -= wheelSpeed * dt;
-    wheels.forEach(w => { w.rotation.x = wheelAngle; });
-
-    winGlow.material.opacity = 0.45 + Math.sin(t * 2.2) * 0.14;
-    bread.position.y = 0.02 + Math.sin(t * 2.0) * 0.008;
-    dict.position.y = 0.295 + Math.sin(t * 1.7) * 0.012;
-    dict.rotation.y = -0.28 + Math.sin(t * 0.9) * 0.14;
-
-    /* 鸟群：扇翅 / 点头 / 偶尔蹦一下（巴士驶入时兴奋加速扇翅） */
-    const excite = 1 + (1 - driveK) * 1.3;
-    birds.forEach(b => {
-      const ph = b.phase, sp = b.speed;
-      const flap = Math.sin(t * 7 * sp * excite + ph);
-      const amp = 0.42 + 0.3 * Math.sin(t * 0.5 + ph);
-      b.pivotL.rotation.z = -0.12 - flap * amp;
-      b.pivotR.rotation.z = 0.12 + flap * amp;
-      b.head.rotation.y = Math.sin(t * 0.7 + ph) * 0.35;
-      const hop = Math.pow(Math.max(0, Math.sin(t * 1.1 + ph * 2)), 22) * 0.05;
-      b.group.position.y = b.baseY + Math.abs(Math.sin(t * sp + ph)) * 0.006 + hop;
-    });
-
-    /* 道具 */
-    leaf.rotation.z = 0.6 + Math.sin(t * 2.4) * 0.35;
-    banner.rotation.z = Math.sin(t * 1.5) * 0.045;
-    banner.position.y = 0.02 + Math.sin(t * 1.5) * 0.006;
-
-    /* 站牌：随风轻摆，乌鸦图标微微转头 */
-    stop.rotation.z = Math.sin(t * 0.7) * 0.045;
-    crowIcon.rotation.y = Math.sin(t * 1.1) * 0.12;
-
-    /* 星星闪烁 */
-    stars.forEach(s => {
-      const k = 0.5 + 0.5 * Math.sin(t * 2.4 + s.userData.ph);
-      s.scale.setScalar(0.35 + k * 0.9);
-    });
-  };
-
-  /* 由远及近驶入：t0 时刻出发 */
-  const startDriveIn = (t0) => { drive = { t0: t0 == null ? 0 : t0 }; };
-
-  return { group, animate, startDriveIn };
-}
-
-/* VR 渐变天空 + 远处星点 */
-function makeSky() {
-  const t = (() => {
-    const cv = document.createElement('canvas'); cv.width = 4; cv.height = 512;
-    const ctx = cv.getContext('2d');
-    const g = ctx.createLinearGradient(0, 0, 0, 512);
-    g.addColorStop(0.00, '#6e5f9c');
-    g.addColorStop(0.38, '#a98fc0');
-    g.addColorStop(0.58, '#f3b98a');
-    g.addColorStop(0.78, '#cfe3d8');
-    g.addColorStop(1.00, '#9fd4e8');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, 4, 512);
-    const tex = new THREE.CanvasTexture(cv);
-    tex.encoding = THREE.sRGBEncoding;
-    return tex;
-  })();
-  const cyl = new THREE.Mesh(
-    new THREE.CylinderGeometry(5, 5, 16, 40, 1, true),
-    new THREE.MeshBasicMaterial({ map: t, side: THREE.BackSide })
-  );
-  cyl.position.y = 0.4;
-  return cyl;
-}
-function makeFarStars() {
-  const N = 160, pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
-  const gold = new THREE.Color(0xffd34d), white = new THREE.Color(0xf5f0e6);
-  for (let i = 0; i < N; i++) {
-    const r = 3.2 + Math.random() * 1.6;
-    const th = Math.random() * Math.PI * 2;
-    const ph = Math.acos(2 * Math.random() - 1);
-    pos[i * 3] = r * Math.sin(ph) * Math.cos(th);
-    pos[i * 3 + 1] = Math.abs(r * Math.cos(ph)) * 0.9 + 0.1;
-    pos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
-    const c = Math.random() < 0.45 ? gold : white;
-    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  return new THREE.Points(g, new THREE.PointsMaterial({
-    size: 0.055, vertexColors: true, transparent: true, opacity: 0.8, sizeAttenuation: true,
-  }));
 }
 </script>
 </body>
