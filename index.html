@@ -52,7 +52,7 @@
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR 全景 · 扫码直达</button>
   <button id="prevBtn">先看一眼彩蛋（静态）</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v8</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v9</p>
 </div>
 
 <div id="container"></div>
@@ -196,6 +196,11 @@ let vrActive = false;
 document.getElementById('vrBtn').addEventListener('click', () => enterVR(false));
 document.getElementById('prevBtn').addEventListener('click', () => enterVR(true));
 document.getElementById('vrExit').addEventListener('click', () => { vrActive = false; vrRoot.style.display = 'none'; backToSplash(); });
+
+/* 二维码深链：?mode=vr 扫码直接进 VR 全景（iOS 自动进入时无手势授权，会退回拖动模式） */
+if (new URLSearchParams(location.search).get('mode') === 'vr') {
+  enterVR(false);
+}
 
 async function enterVR(staticPreview = false) {
   splash.style.display = 'none';
