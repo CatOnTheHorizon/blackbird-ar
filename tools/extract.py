@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""从月历插画中抠出各元素为透明 PNG 贴片（最终版）
-方法：以「深色墨线 + 红色」为边界，从画面边缘 flood 圈背景；
-墨线闭合区域全部视为元素；站牌黄盘按红环拟合圆强制填充。"""
+"""从月历插画中抠出各元素为透明 PNG 贴片（v2 色差分割版）
+思路：背景是纵向平滑渐变 + 纸面噪点 → 先高斯模糊去噪，再按「与背景渐变的色差」
++ 墨线 + 红色 判定前景；闭合 + 填洞（仅实心元素）后按种子连通块取元素。
+"""
 import os, json
 import numpy as np
 from PIL import Image
@@ -18,18 +19,26 @@ img = np.asarray(Image.open(SRC).convert("RGB"))
 H, W = img.shape[:2]
 R, G, B = img[:, :, 0].astype(np.int16), img[:, :, 1].astype(np.int16), img[:, :, 2].astype(np.int16)
 
-# ── 边界：深色墨线 + 红色 ──
+# ── 背景纵向渐变（左缘中位数）──
+bgcol = np.zeros((H, 3), np.float32)
+for y in range(H):
+    bgcol[y] = np.median(img[y, 0:40].astype(np.float32), axis=0)
+bgcol = ndimage.uniform_filter1d(bgcol, size=25, axis=0)
+
+# ── 分割掩码 ──
+blur = np.stack([ndimage.gaussian_filter(img[:, :, c], 2) for c in range(3)], axis=2).astype(np.float32)
+diff = np.abs(blur - bgcol[:, None, :]).max(axis=2)
 ink  = img.max(axis=2) < 115
 red  = (R > 120) & ((R - np.maximum(G, B)) > 55)
-barrier = ink | red
-free = ~barrier
-lab, n = ndimage.label(free)
-border_ids = set(np.concatenate([lab[0, :], lab[-1, :], lab[:, 0], lab[:, -1]]).tolist())
-border_ids.discard(0)
-bg = np.isin(lab, list(border_ids))
-fg = ~bg
+fg_global = ink | red | (diff > 60)
+# 横幅卷轴的奶油色：亮度高且不低于蓝色分量（浅蓝天空 B 最大，可区分）
+cream = (R > 195) & (G > 185) & (B > 135) & (B < R + 8)
+cream[:690, :] = False
+cream[830:, :] = False          # 只允许出现在横幅那一带
+band = np.zeros_like(cream); band[690:830, 900:1330] = True
+fg_global = fg_global | (cream & band)
 
-# ── 长椅上沿（木色出现的最早行）──
+# ── 长椅上沿 ──
 wood = (R > 165) & (G > 125) & (G < 205) & (B < 140)
 slat_top = H
 for y in range(int(H * 0.7), H):
@@ -38,64 +47,67 @@ for y in range(int(H * 0.7), H):
         break
 print("slat_top =", slat_top)
 
+SLAT = slat_top - 12      # 鸟贴片底边：避开长椅顶部黑边
+
 def feather(b, sigma=0.8):
     return np.clip(ndimage.gaussian_filter(b.astype(np.float32), sigma), 0, 1)
 
 def keep_seed_components(mask, seeds, min_area=250):
-    lab2, n2 = ndimage.label(mask)
+    lab, n = ndimage.label(mask)
     keep = np.zeros_like(mask)
     ids = set()
     for sx, sy in seeds:
         if 0 <= sy < mask.shape[0] and 0 <= sx < mask.shape[1]:
-            i = lab2[sy, sx]
+            i = lab[sy, sx]
             if i:
                 ids.add(i)
     if not ids:
-        sizes = ndimage.sum(mask, lab2, range(1, n2 + 1))
-        if n2:
+        sizes = ndimage.sum(mask, lab, range(1, n + 1))
+        if n:
             ids.add(int(np.argmax(sizes)) + 1)
     for i in ids:
-        keep |= (lab2 == i)
-    lab3, n3 = ndimage.label(keep)
+        keep |= (lab == i)
+    lab2, n2 = ndimage.label(keep)
     out = np.zeros_like(keep)
-    for i in range(1, n3 + 1):
-        comp = (lab3 == i)
+    for i in range(1, n2 + 1):
+        comp = (lab2 == i)
         if comp.sum() >= min_area:
             out |= comp
     return out
 
-SLAT = slat_top - 3
 CROPS = {
-    "bus":   (145, 160, 1225, 830,  [(680, 400)]),
-    "bird1": (60,   740, 350,  SLAT, [(190, 950 - 740)]),
-    "bird2": (300,  790, 560,  SLAT, [(420, 950 - 790)]),
-    "bird3": (495,  680, 815,  SLAT, [(650, 950 - 680), (575, 760 - 680)]),
-    "bird4": (760,  790, 1085, SLAT, [(880, 950 - 790), (1000, 1030 - 790)]),
-    "bird6": (850,  650, 1345, SLAT, [(1130, 950 - 690), (1085, 765 - 690)]),
-    "sign":  (1330, 0,   1745, 1280, None),   # None = 保留全部大组件（不做种子筛选）
-    "bench": (55,  slat_top - 6, 1300, 1280, [(600, 100), (150, 250)]),
+    # name: (x0, y0, x1, y1, seeds 相对裁剪坐标, 是否填洞)
+    "bus":   (145, 160, 1225, 830,  [(535, 400), (692, 613), (191, 611)], "ink"),
+    "bird1": (60,   740, 350,  SLAT, [(130, 210)], False),
+    "bird2": (300,  790, 560,  SLAT, [(120, 160)], False),
+    "bird3": (495,  680, 815,  SLAT, [(155, 270), (80, 80)], False),
+    "bird4": (760,  790, 1085, SLAT, [(120, 160), (240, 240)], False),
+    "bird6": (850,  650, 1345, SLAT, [(280, 300), (235, 115)], False),
+    "sign":  (1330, 0,   1745, 1280, [(210, 200), (270, 640), (110, 1000)], True),
+    "bench": (55,  slat_top - 6, 1300, 1280, [(600, 60), (200, 40)], True),
 }
 
 rects, alphas = {}, {}
-for name, (x0, y0, x1, y1, seeds) in CROPS.items():
-    fgc = fg[y0:y1, x0:x1]
-    if seeds is None:
-        # 站牌：保留所有面积够大的组件（红环/黄盘/乌鸦/杆），去火星点
-        lab2, n2 = ndimage.label(fgc)
-        keep = np.zeros_like(fgc)
-        for i in range(1, n2 + 1):
-            comp = (lab2 == i)
-            if comp.sum() >= 1500:
-                keep |= comp
+for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
+    if mode == "ink":
+        ink_c = ndimage.binary_closing(ink[y0:y1, x0:x1], iterations=2)
+        fgc = ndimage.binary_fill_holes(ink_c) | red[y0:y1, x0:x1]
+        fgc = ndimage.binary_opening(fgc, iterations=1)
     else:
-        keep = keep_seed_components(fgc, seeds)
+        fgc = fg_global[y0:y1, x0:x1].copy()
+        fgc = ndimage.binary_closing(fgc, iterations=2)
+        fgc = ndimage.binary_opening(fgc, iterations=2)
+        if mode is True:
+            fgc = ndimage.binary_fill_holes(fgc)
+    keep = keep_seed_components(fgc, seeds, min_area=500 if name == "bus" else 250)
     if name == "bird6":
-        # 横幅卷轴：墨线（+红）闭合填充，把卷轴底色和文字补回来
-        b_ink = barrier[y0:y1, x0:x1] | red[y0:y1, x0:x1]
-        bs, be = max(0, 650 - y0), 870 - y0      # 横幅带的裁剪内纵向范围
-        strip = np.zeros_like(b_ink)
-        strip[bs:be, :] = b_ink[bs:be, :]
-        keep |= ndimage.binary_fill_holes(strip)
+        keep = ndimage.binary_opening(keep, iterations=1)
+        busA = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))[:, :, 3] > 10
+        bmask = np.zeros((H, W), bool)
+        bmask[160:830, 145:1225] = busA
+        bmask = ndimage.binary_dilation(bmask, iterations=4)[y0:y1, x0:x1]
+        keep &= ~bmask
+        keep = ndimage.binary_fill_holes(keep)
     a = feather(keep)
     rgba = np.dstack([img[y0:y1, x0:x1], (a * 255).astype(np.uint8)])
     im = Image.fromarray(rgba.astype(np.uint8), "RGBA")
@@ -105,8 +117,9 @@ for name, (x0, y0, x1, y1, seeds) in CROPS.items():
     checker = Image.new("RGB", (x1 - x0, y1 - y0), (45, 45, 60))
     checker.paste(im, (0, 0), im)
     checker.save(os.path.join(DBG, f"{name}_check.png"))
+    Image.fromarray((a * 255).astype(np.uint8)).save(os.path.join(DBG, f"alpha_{name}.png"))
 
-# ── 鸟贴片去重：后处理的鸟扣掉前面鸟已占据的像素（避免重叠区在动画中分身）──
+# ── 鸟贴片去重：后处理的鸟扣掉前面鸟已占据的像素 ──
 acc = np.zeros((H, W), np.float32)
 for name in ["bird1", "bird2", "bird3", "bird4", "bird6"]:
     fp = os.path.join(OUT, f"{name}.png")
@@ -120,26 +133,26 @@ for name in ["bird1", "bird2", "bird3", "bird4", "bird6"]:
     acc = np.maximum(acc, a_full)
     alphas[name] = a_full[y0:y1, x0:x1]
 
-# ── 站牌黄盘：按黄色区域检测圆心半径，强制填充内部 ──
+# ── 站牌圆盘：按红环拟合圆，兜底强制填充 ──
 x0, y0, x1, y1 = rects["sign"]
 sign_rgb = img[y0:y1, x0:x1]
-yellow = (sign_rgb[:, :, 0] > 185) & (sign_rgb[:, :, 1] > 160) & (sign_rgb[:, :, 2] < 150)
-yellow[int(y1 * 0.45):, :] = False      # 只看上半部分（黄盘）
-y_lab, y_n = ndimage.label(yellow)
+sr = (sign_rgb[:, :, 0] > 120) & ((sign_rgb[:, :, 0].astype(np.int16) - np.maximum(sign_rgb[:, :, 1], sign_rgb[:, :, 2])) > 55)
+sr[int(sign_rgb.shape[0] * 0.45):, :] = False
+s_lab, s_n = ndimage.label(sr)
 sign_file = os.path.join(OUT, "sign.png")
 sign_img = np.asarray(Image.open(sign_file).convert("RGBA")).copy()
-if y_n:
-    sizes = ndimage.sum(yellow, y_lab, range(1, y_n + 1))
+if s_n:
+    sizes = ndimage.sum(sr, s_lab, range(1, s_n + 1))
     ci = int(np.argmax(sizes)) + 1
-    ys, xs = np.nonzero(y_lab == ci)
+    ys, xs = np.nonzero(s_lab == ci)
     ccx, ccy = xs.mean(), ys.mean()
-    rad = 0.5 * max(xs.max() - xs.min(), ys.max() - ys.min()) + 6
+    rad = (np.sqrt((xs - ccx) ** 2 + (ys - ccy) ** 2)).max() + 3
     yy, xx = np.mgrid[0:sign_img.shape[0], 0:sign_img.shape[1]]
     d = np.sqrt((xx - ccx) ** 2 + (yy - ccy) ** 2)
     inside = np.clip((rad - d) / 2.5, 0, 1)
     sign_img[:, :, 3] = np.maximum(sign_img[:, :, 3], (inside * 255).astype(np.uint8))
     Image.fromarray(sign_img, "RGBA").save(sign_file)
-    print("disc filled: c=(%.0f,%.0f) r=%.0f" % (ccx, ccy, rad))
+    print("disc fill: c=(%.0f,%.0f) r=%.0f" % (ccx, ccy, rad))
     alphas["sign"] = sign_img[:, :, 3].astype(np.float32) / 255
 
 # ── 车轮（巴士贴片内红区）──
@@ -191,10 +204,6 @@ bench[fill_mask] = filled[fill_mask]
 Image.fromarray(bench, "RGBA").save(os.path.join(OUT, "bench.png"))
 
 # ── 天空色标 ──
-bgcol = np.zeros((H, 3), np.float32)
-for y in range(H):
-    bgcol[y] = np.median(img[y, 0:40].astype(np.float32), axis=0)
-bgcol = ndimage.uniform_filter1d(bgcol, size=25, axis=0)
 stops = []
 for i in range(9):
     y = int(i * (H - 1) / 8)
