@@ -51,7 +51,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 立体场景</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v11</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v12</p>
 </div>
 
 <div id="container"></div>
@@ -277,7 +277,7 @@ async function enterVR(auto = false) {
     const tanV = Math.tan((camera.fov * Math.PI / 180) / 2);
     const aspect = innerWidth / innerHeight;
     const halfW = 1.06, halfH = 1.02;          // 场景内容半宽/半高（居中后）
-    const d = Math.max(halfW / (tanV * aspect), halfH / tanV) * 1.08;
+    const d = Math.max(halfW / (tanV * aspect), halfH / tanV) * 1.18;
     camera.position.set(0, 0.16, d);
     camera.lookAt(0, 0.02, 0);
   };
@@ -432,11 +432,15 @@ function createDiorama() {
   function makeBird(s = 1) {
     const g = new THREE.Group();
     const bodyM = mesh(new THREE.SphereGeometry(0.075, 12, 10), C.black);
-    bodyM.scale.set(1, 1.22, 0.9);
-    const head = mesh(new THREE.SphereGeometry(0.043, 12, 10), C.black);
-    head.position.set(0, 0.118, 0.022);
-    const beak = mesh(new THREE.ConeGeometry(0.016, 0.05, 8), 0x26201c);
-    beak.rotation.x = Math.PI / 2; beak.position.set(0, 0.115, 0.078);
+    bodyM.scale.set(0.95, 1.18, 0.85);
+    const head = mesh(new THREE.SphereGeometry(0.048, 12, 10), C.black);
+    head.position.set(0, 0.135, 0.028);
+    const beak = mesh(new THREE.ConeGeometry(0.017, 0.055, 8), 0x26201c);
+    beak.rotation.x = Math.PI / 2; beak.position.set(0, 0.132, 0.088);
+    /* 白色眼点：让剪影里有鸟的辨识度 */
+    const eyeL = mesh(new THREE.SphereGeometry(0.0095, 6, 6), 0xf5efe0);
+    eyeL.position.set(-0.019, 0.148, 0.055);
+    const eyeR = eyeL.clone(); eyeR.position.x = 0.019;
     const tail = mesh(new THREE.ConeGeometry(0.028, 0.09, 6), C.black);
     tail.rotation.x = -(Math.PI / 2 + 0.42); tail.position.set(0, -0.015, -0.10);
     const pivotL = new THREE.Group(); pivotL.position.set(-0.062, 0.03, 0);
@@ -447,7 +451,7 @@ function createDiorama() {
     const wingR = mesh(new THREE.SphereGeometry(0.052, 10, 8), C.black);
     wingR.scale.set(0.36, 0.95, 0.55); wingR.position.set(0.022, -0.01, 0);
     pivotR.add(wingR);
-    g.add(bodyM, head, beak, tail, pivotL, pivotR);
+    g.add(bodyM, head, beak, eyeL, eyeR, tail, pivotL, pivotR);
     g.scale.setScalar(s);
     return { group: g, head, pivotL, pivotR };
   }
@@ -479,16 +483,16 @@ function createDiorama() {
   const bag = mesh(new THREE.BoxGeometry(0.055, 0.065, 0.03), 0xc9503c);
   bag.position.set(0.07, 0.02, 0.045); birds[3].group.add(bag);
 
-  /* 横幅（第 4、5 只鸟举着）：两根杆 + 布面文字，整体轻摆 */
+  /* 横幅（第 4、5 只鸟之间举着）：两根杆 + 布面文字，整体轻摆 */
   const banner = new THREE.Group();
-  banner.position.set(0.62, 0.02, 0.02);
+  banner.position.set(-0.14, 0.02, 0.02);          // 相对第 5 只鸟，落到两只鸟之间
   const bannerCloth = textPlane('要变成一块好吃的面包哦', {
     w: 0.52, h: 0.09, bg: '#f5efdc', fg: '#2a2622', font: 'bold 40px sans-serif',
   });
-  bannerCloth.position.set(-0.14, 0.32, 0.015);
-  const stickA = mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.20, 6), C.woodDark);
-  stickA.position.set(-0.395, 0.23, 0.015);
-  const stickB = stickA.clone(); stickB.position.x = 0.115;
+  bannerCloth.position.set(0, 0.36, 0.015);
+  const stickA = mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.32, 6), C.woodDark);
+  stickA.position.set(-0.26, 0.19, 0.015);
+  const stickB = stickA.clone(); stickB.position.x = 0.26;
   banner.add(bannerCloth, stickA, stickB);
   birds[4].group.add(banner);
 
