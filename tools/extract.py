@@ -83,15 +83,16 @@ CROPS = {
     "bird3": (495,  680, 815,  SLAT, [(155, 270), (80, 80)], False),
     "bird4": (760,  790, 1085, SLAT, [(120, 160), (240, 240)], False),
     "bird6": (850,  650, 1345, SLAT, [(280, 300), (235, 115)], False),
-    "sign":  (1330, 0,   1745, 1280, [(210, 200), (270, 640), (110, 1000)], True),
+    "sign":  (1255, 0,   1745, 1280, None, "ink_all"),
     "bench": (55,  slat_top - 6, 1300, 1280, [(600, 60), (200, 40)], True),
 }
 
 rects, alphas = {}, {}
 for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
-    if mode == "ink":
-        ink_c = ndimage.binary_closing(ink[y0:y1, x0:x1], iterations=2)
-        fgc = ndimage.binary_fill_holes(ink_c) | red[y0:y1, x0:x1]
+    if mode in ("ink", "ink_all"):
+        ink_c = ink[y0:y1, x0:x1] | red[y0:y1, x0:x1]
+        ink_c = ndimage.binary_closing(ink_c, iterations=2)
+        fgc = ndimage.binary_fill_holes(ink_c)
         fgc = ndimage.binary_opening(fgc, iterations=1)
     else:
         fgc = fg_global[y0:y1, x0:x1].copy()
@@ -99,7 +100,15 @@ for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
         fgc = ndimage.binary_opening(fgc, iterations=2)
         if mode is True:
             fgc = ndimage.binary_fill_holes(fgc)
-    keep = keep_seed_components(fgc, seeds, min_area=500 if name == "bus" else 250)
+    if mode == "ink_all":
+        lab_a, n_a = ndimage.label(fgc)
+        keep = np.zeros_like(fgc)
+        for i in range(1, n_a + 1):
+            comp = (lab_a == i)
+            if comp.sum() >= 1500:
+                keep |= comp
+    else:
+        keep = keep_seed_components(fgc, seeds, min_area=500 if name == "bus" else 250)
     if name == "bird6":
         keep = ndimage.binary_opening(keep, iterations=1)
         busA = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))[:, :, 3] > 10
@@ -133,27 +142,84 @@ for name in ["bird1", "bird2", "bird3", "bird4", "bird6"]:
     acc = np.maximum(acc, a_full)
     alphas[name] = a_full[y0:y1, x0:x1]
 
-# ── 站牌圆盘：按红环拟合圆，兜底强制填充 ──
-x0, y0, x1, y1 = rects["sign"]
-sign_rgb = img[y0:y1, x0:x1]
-sr = (sign_rgb[:, :, 0] > 120) & ((sign_rgb[:, :, 0].astype(np.int16) - np.maximum(sign_rgb[:, :, 1], sign_rgb[:, :, 2])) > 55)
-sr[int(sign_rgb.shape[0] * 0.45):, :] = False
-s_lab, s_n = ndimage.label(sr)
-sign_file = os.path.join(OUT, "sign.png")
-sign_img = np.asarray(Image.open(sign_file).convert("RGBA")).copy()
-if s_n:
-    sizes = ndimage.sum(sr, s_lab, range(1, s_n + 1))
-    ci = int(np.argmax(sizes)) + 1
-    ys, xs = np.nonzero(s_lab == ci)
-    ccx, ccy = xs.mean(), ys.mean()
-    rad = (np.sqrt((xs - ccx) ** 2 + (ys - ccy) ** 2)).max() + 3
-    yy, xx = np.mgrid[0:sign_img.shape[0], 0:sign_img.shape[1]]
-    d = np.sqrt((xx - ccx) ** 2 + (yy - ccy) ** 2)
-    inside = np.clip((rad - d) / 2.5, 0, 1)
-    sign_img[:, :, 3] = np.maximum(sign_img[:, :, 3], (inside * 255).astype(np.uint8))
-    Image.fromarray(sign_img, "RGBA").save(sign_file)
-    print("disc fill: c=(%.0f,%.0f) r=%.0f" % (ccx, ccy, rad))
-    alphas["sign"] = sign_img[:, :, 3].astype(np.float32) / 255
+# ── 站牌重建：牌子向右补全（含 N 字）+ 杆子重画到圆头 ──
+def rebuild_sign():
+    sx0, sy0 = 1255, 0
+    art_path = os.path.join(OUT, "sign.png")
+    art = np.asarray(Image.open(art_path).convert("RGBA")).copy()   # 415 x 1280
+    AH, AW = art.shape[:2]
+    NEWW = 580
+    TOPPAD = 110
+    canvas = np.zeros((AH + TOPPAD, NEWW, 4), np.uint8)
+
+    # 杆子位置：tan 色检测（行 800..1200）
+    strip = img[800:1200, 1480:1640]
+    tanm = (np.abs(strip[:, :, 0].astype(int) - 234) < 28) &            (np.abs(strip[:, :, 1].astype(int) - 206) < 28) &            (np.abs(strip[:, :, 2].astype(int) - 158) < 36)
+    xs = np.nonzero(tanm)[1]
+    if len(xs):
+        px_a = int(np.percentile(xs, 5)) + 1480 - sx0
+        px_b = int(np.percentile(xs, 95)) + 1480 - sx0
+    else:
+        px_a, px_b = 206, 238
+    tan_col = np.array([234, 206, 158, 255], np.uint8)
+    dark    = np.array([30, 20, 15, 255], np.uint8)
+    pole_top, pole_bot, cap_r = 522, 1228, 16
+    canvas[pole_top + TOPPAD:pole_bot + TOPPAD, px_a:px_b] = tan_col
+    canvas[pole_top + TOPPAD:pole_bot + TOPPAD, px_a:px_a + 2] = dark
+    canvas[pole_top + TOPPAD:pole_bot + TOPPAD, px_b - 2:px_b] = dark
+    yy, xx = np.mgrid[0:AH + TOPPAD, 0:NEWW]
+    yy_art = yy - TOPPAD
+    cx_cap = (px_a + px_b) / 2.0
+    dist = np.sqrt((yy_art - pole_bot) ** 2 + (xx - cx_cap) ** 2)
+    canvas[(dist <= cap_r) & (yy_art >= pole_bot)] = tan_col
+    canvas[(np.abs(dist - cap_r) <= 1.5) & (yy_art >= pole_bot)] = dark
+
+    # 贴回原画部件（圆盘/牌子/乌鸦）
+    am = art[:, :, 3] > 128
+    # 排除横幅右端残片（左下角区域），避免混入站牌
+    yy_a, xx_a = np.mgrid[0:AH, 0:AW]
+    am = am & ~((yy_a > 790) & (xx_a < 1500 - sx0))
+    am = am & ~((yy_a > 600) & (yy_a < 700) & (xx_a < 60))   # 左侧碎屑
+    region = canvas[TOPPAD:TOPPAD + AH, :AW]
+    region[am] = art[am]
+
+    # 补全被图片上边缘切掉的圆盘顶部（最小二乘拟合红环）
+    rim = red[0:560, 1255:1745]
+    ys_r, xs_r = np.nonzero(rim)
+    drop = (ys_r > 545)
+    ys_r, xs_r = ys_r[~drop], xs_r[~drop]
+    if len(xs_r) > 500:
+        A = np.c_[xs_r, ys_r, np.ones(len(xs_r))]
+        b = -(xs_r.astype(np.float64) ** 2 + ys_r.astype(np.float64) ** 2)
+        sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+        ccx, ccy = -sol[0] / 2, -sol[1] / 2
+        r_fit = np.sqrt(ccx * ccx + ccy * ccy - sol[2])
+        dists = np.sqrt((xs_r - ccx) ** 2 + (ys_r - ccy) ** 2)
+        r_in = float(np.percentile(dists, 2)) - 2
+        r_out = float(np.percentile(dists, 98)) + 3
+        print("disc circle: c=(%.0f,%.0f) r=%.0f in=%.0f out=%.0f" % (ccx, ccy, r_fit, r_in, r_out))
+
+        yy2, xx2 = np.mgrid[0:AH + TOPPAD, 0:NEWW]
+        dx = xx2 - ccx
+        dy = yy2 - (ccy + TOPPAD)
+        dd = np.sqrt(dx * dx + dy * dy)
+        empty = canvas[:, :, 3] == 0
+        red_c = np.array([205, 118, 80, 255], np.uint8)
+        yellow_c = np.array([233, 206, 103, 255], np.uint8)
+        dark_c = np.array([30, 20, 15, 255], np.uint8)
+
+        face = (dd < r_in) & empty
+        canvas[face] = yellow_c
+        ring = (dd >= r_in) & (dd <= r_out) & empty
+        canvas[ring] = red_c
+        canvas[(np.abs(dd - r_in) <= 1.6) & empty] = dark_c
+        canvas[(np.abs(dd - r_out) <= 1.6) & empty] = dark_c
+
+    Image.fromarray(canvas, "RGBA").save(art_path)
+    rects["sign"] = (sx0, -TOPPAD, sx0 + NEWW, 1280)
+    print("sign rebuilt:", rects["sign"], "pole x", px_a, px_b)
+
+rebuild_sign()
 
 # ── 车轮（巴士贴片内红区）──
 bus_img = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))

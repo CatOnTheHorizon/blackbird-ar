@@ -47,7 +47,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v17</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v18</p>
 </div>
 
 <div id="container"></div>
@@ -91,6 +91,56 @@ window.addEventListener('unhandledrejection', (e) => {
   showErr((r && (r.message || r)) || '未处理的异常');
 });
 const backToSplash = () => { splash.style.display = 'flex'; };
+
+/* ── 音效（Web Audio 合成，无需外部文件） ── */
+let actx = null;
+function ensureAudio() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  if (!actx) actx = new Ctx();
+  if (actx.state === 'suspended') actx.resume();
+  return actx;
+}
+function playHorn() {
+  const ctx = ensureAudio(); if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const master = ctx.createGain(); master.gain.value = 0.14;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1500;
+  master.connect(lp).connect(ctx.destination);
+  const beep = (start, dur) => {
+    [392, 494].forEach(f => {
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t0 + start);
+      g.gain.linearRampToValueAtTime(1, t0 + start + 0.03);
+      g.gain.setValueAtTime(1, t0 + start + dur - 0.05);
+      g.gain.linearRampToValueAtTime(0, t0 + start + dur);
+      o.connect(g).connect(master);
+      o.start(t0 + start); o.stop(t0 + start + dur + 0.02);
+    });
+  };
+  beep(0, 0.26);
+  beep(0.36, 0.5);
+}
+function playCheer() {
+  const ctx = ensureAudio(); if (!ctx) return;
+  const t0 = ctx.currentTime;
+  for (let i = 0; i < 16; i++) {
+    const st = Math.random() * 1.2;
+    const f0 = 1900 + Math.random() * 1400;
+    const dur = 0.05 + Math.random() * 0.07;
+    const o = ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(f0, t0 + st);
+    o.frequency.exponentialRampToValueAtTime(f0 * 1.45, t0 + st + dur * 0.55);
+    o.frequency.exponentialRampToValueAtTime(f0 * 0.95, t0 + st + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t0 + st);
+    g.gain.linearRampToValueAtTime(0.05, t0 + st + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0008, t0 + st + dur);
+    o.connect(g).connect(ctx.destination);
+    o.start(t0 + st); o.stop(t0 + st + dur + 0.02);
+  }
+}
 
 /* ══════════ 原画贴片场景（AR / VR 共用） ══════════ */
 const UNIT = 1 / 1745;                    // 目标图宽归一化为 1
@@ -196,9 +246,11 @@ function createArtScene(meta, tex, opts = {}) {
   {
     const [x0, y0, x1, y1] = meta.rects.sign;
     const sign = spriteMesh('sign', meta, tex, 0);
-    const px = pxX((x0 + x1) / 2), pyBottom = pxY(y1);
-    signGroup.position.set(px, pyBottom, signZ);
-    sign.position.set(0, (pxY((y0 + y1) / 2) - pyBottom), 0);
+    sign.material.side = THREE.DoubleSide;      // 翻转时背面可见
+    const pivotX = pxX(1554);                   // 杆轴
+    const pyBottom = pxY(y1);
+    signGroup.position.set(pivotX, pyBottom, signZ);
+    sign.position.set(pxX((x0 + x1) / 2) - pivotX, pxY((y0 + y1) / 2) - pyBottom, 0);
     signGroup.add(sign);
     group.add(signGroup);
   }
@@ -249,6 +301,7 @@ function createArtScene(meta, tex, opts = {}) {
   const busRest = new THREE.Vector3(0, 0, -0.04);
   const busStart = new THREE.Vector3(driveFromX, 0, -0.04);
   let drive = null, wheelAngle = 0, lastT = 0;
+  let hornFired = false, cheerFired = false, wasDriving = false;
 
   const animate = (t) => {
     const dt = Math.min(0.05, Math.max(0, t - lastT));
@@ -282,17 +335,33 @@ function createArtScene(meta, tex, opts = {}) {
     wheelAngle -= wheelSpeed * dt;
     wheels.forEach(w => { w.rotation.z = wheelAngle; });
 
-    /* 鸟群 */
+    /* 鸟群：每只独立地上下跳跃 */
     const excite = 1 + (1 - driveK) * 1.1;
-    birds.forEach(b => {
+    birds.forEach((b, i) => {
       const ph = b.userData.phase;
-      const hop = Math.pow(Math.max(0, Math.sin(t * 0.9 * excite + ph * 2)), 22) * 0.016;
-      b.position.y = b.userData.baseY + Math.abs(Math.sin(t * 0.55 * excite + ph)) * 0.0035 + hop;
-      b.rotation.z = Math.sin(t * 0.5 * excite + ph) * 0.012;
+      const period = (2.4 + (i * 0.53) % 1.6) / excite;   // 各自周期不同
+      const cyc = ((t / period) + ph) % 1;
+      let hop = 0;
+      if (cyc < 0.55) {
+        const q = cyc / 0.55;                              // 抛物线式腾空
+        hop = 4 * q * (1 - q);
+      }
+      const h = 0.020 + (i % 3) * 0.006;                   // 跳起高度不同
+      b.position.y = b.userData.baseY + hop * h + Math.sin(t * 1.3 + ph) * 0.002;
+      b.rotation.z = Math.sin(t * 2 + ph) * 0.02 + hop * 0.04;
     });
 
-    /* 站牌轻摆 */
-    signGroup.rotation.z = Math.sin(t * 0.7) * 0.010;
+    /* 站牌：轻摆 + 周期性整体翻转 */
+    const flipCycle = 9.0;
+    const fu = (t % flipCycle) / flipCycle;
+    let signRotY = Math.sin(t * 0.6) * 0.08;
+    if (fu < 0.22) {
+      const q = fu / 0.22;
+      const fe = q * q * (3 - 2 * q);
+      signRotY += Math.PI * 2 * fe;
+    }
+    signGroup.rotation.y = signRotY;
+    signGroup.rotation.z = Math.sin(t * 0.7) * 0.008;
 
     /* 星星闪烁 */
     stars.forEach(s => {
@@ -308,7 +377,7 @@ function createArtScene(meta, tex, opts = {}) {
 }
 
 /* ══════════ AR 模式 ══════════ */
-document.getElementById('arBtn').addEventListener('click', startAR);
+document.getElementById('arBtn').addEventListener('click', () => { ensureAudio(); startAR(); });
 
 async function startAR() {
   splash.style.display = 'none';
@@ -372,7 +441,7 @@ async function startAR() {
   const anchor = mindarThree.addAnchor(0);
   const anchorRoot = anchor.group || anchor;
 
-  const art = createArtScene(ART_META, ART_TEX, { withSky: false, driveFromX: 1.15, driveDur: 3.6 });
+  const art = createArtScene(ART_META, ART_TEX, { withSky: false, driveFromX: -1.15, driveDur: 3.6 });
   art.group.position.z = 0.01;
   anchorRoot.add(art.group);
 
@@ -420,7 +489,7 @@ let vrActive = false;
 let vrState = null;
 let yawT = 0, pitchT = 0, lastInteract = 0, gyroBase = null, gyroOff = 0;
 
-document.getElementById('vrBtn').addEventListener('click', () => enterVR(false));
+document.getElementById('vrBtn').addEventListener('click', () => { ensureAudio(); enterVR(false); });
 document.getElementById('vrExit').addEventListener('click', () => {
   vrActive = false;
   vrRoot.style.display = 'none';
@@ -501,7 +570,7 @@ async function enterVR(auto = false) {
     fitCamera();
   });
 
-  const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: 1.35, driveDur: 4.2 });
+  const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: -1.35, driveDur: 4.2 });
   scene.add(art.group);
   art.startDriveIn(0.9);
 
