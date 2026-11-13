@@ -47,7 +47,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v20</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v21</p>
 </div>
 
 <div id="container"></div>
@@ -362,7 +362,7 @@ function createArtScene(meta, tex, opts = {}) {
     });
 
     /* 站牌：轻摆 + 周期性整体翻转 */
-    const flipCycle = 9.0;
+    const flipCycle = 5.0;
     const fu = (t % flipCycle) / flipCycle;
     let signRotY = Math.sin(t * 0.6) * 0.08;
     if (fu < 0.22) {
@@ -451,7 +451,7 @@ async function startAR() {
   const anchor = mindarThree.addAnchor(0);
   const anchorRoot = anchor.group || anchor;
 
-  const art = createArtScene(ART_META, ART_TEX, { withSky: false, driveFromX: -1.15, driveDur: 3.6 });
+  const art = createArtScene(ART_META, ART_TEX, { withSky: false, driveFromX: -1.15, driveDur: 5.2 });
   art.group.position.z = 0.01;
   anchorRoot.add(art.group);
 
@@ -603,7 +603,7 @@ async function enterVR(auto = false) {
     fitCamera();
   });
 
-  const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: -1.35, driveDur: 4.2 });
+  const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: -1.35, driveDur: 6.5 });
   scene.add(art.group);
   art.startDriveIn(0.9);
 

@@ -32,7 +32,7 @@ ink  = img.max(axis=2) < 115
 red  = (R > 120) & ((R - np.maximum(G, B)) > 55)
 fg_global = ink | red | (diff > 60)
 # 横幅卷轴的奶油色：亮度高且不低于蓝色分量（浅蓝天空 B 最大，可区分）
-cream = (R > 195) & (G > 185) & (B > 135) & (B < R + 8)
+cream = (R > 195) & (G > 185) & (B > 148) & (B < R + 8)
 cream[:690, :] = False
 cream[830:, :] = False          # 只允许出现在横幅那一带
 band = np.zeros_like(cream); band[690:830, 900:1330] = True
@@ -78,11 +78,11 @@ def keep_seed_components(mask, seeds, min_area=250):
 CROPS = {
     # name: (x0, y0, x1, y1, seeds 相对裁剪坐标, 是否填洞)
     "bus":   (145, 160, 1225, 830,  [(535, 400), (692, 613), (191, 611)], "ink"),
-    "bird1": (60,   740, 350,  SLAT, [(130, 210)], False),
-    "bird2": (300,  790, 560,  SLAT, [(120, 160)], False),
-    "bird3": (495,  680, 815,  SLAT, [(155, 270), (80, 80)], False),
-    "bird4": (760,  790, 1085, SLAT, [(120, 160), (240, 240)], False),
-    "bird6": (850,  650, 1345, SLAT, [(280, 300), (235, 115)], False),
+    "bird1": (60,   740, 350,  slat_top + 6, [(130, 210)], False),
+    "bird2": (300,  790, 560,  slat_top + 6, [(120, 160)], False),
+    "bird3": (495,  680, 815,  slat_top + 6, [(155, 270), (80, 80)], False),
+    "bird4": (760,  790, 1085, slat_top + 6, [(120, 160), (240, 240)], False),
+    "bird6": (850,  650, 1345, slat_top + 6, [(280, 300), (235, 115)], False),
     "sign":  (1255, 0,   1745, 1280, None, "ink_all"),
     "bench": (55,  slat_top - 6, 1300, 1280, [(600, 60), (200, 40)], True),
 }
@@ -109,6 +109,36 @@ for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
                 keep |= comp
     else:
         keep = keep_seed_components(fgc, seeds, min_area=500 if name == "bus" else 250)
+    if name.startswith("bird"):
+        # 补脚：底边以内、避开长椅整条横线（覆盖率高）的墨迹算脚
+        base_lo = max(0, SLAT - y0 - 25)
+        base_hi = max(1, SLAT - y0)
+        cols = np.nonzero(keep[base_lo:base_hi, :].any(axis=0))[0]
+        if len(cols):
+            lo, hi = max(0, cols.min() - 10), min(keep.shape[1], cols.max() + 11)
+            ink_crop = ink[y0:y1, x0:x1]
+            for ry in range(max(0, SLAT - y0 - 2), keep.shape[0]):
+                row_ink = ink_crop[ry, :]
+                if row_ink.mean() > 0.5:
+                    continue          # 长椅横线，跳过
+                seg = row_ink.copy()
+                seg[:lo] = False; seg[hi:] = False
+                keep[ry, :] |= seg
+    if name.startswith("bird"):
+        keep &= ~wood[y0:y1, x0:x1]      # 木色属于长椅，不属于鸟
+        # 底边：从鸟身向下连通生长（保留相连的脚），并断开长椅横线
+        ink_crop2 = ink[y0:y1, x0:x1]
+        cut = max(0, SLAT - y0 - 2)
+        extra = np.zeros_like(keep)
+        for ry in range(cut, keep.shape[0]):
+            row_ink = ink_crop2[ry, :]
+            if row_ink.mean() > 0.5:
+                continue                 # 长椅横线行
+            extra[ry, :] = row_ink
+        seeds = np.zeros_like(keep)
+        seeds[:cut, :] = keep[:cut, :]
+        mask = keep | extra
+        keep = ndimage.binary_propagation(seeds, mask=mask)
     if name == "bird6":
         keep = ndimage.binary_opening(keep, iterations=1)
         busA = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))[:, :, 3] > 10
@@ -128,19 +158,59 @@ for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
     checker.save(os.path.join(DBG, f"{name}_check.png"))
     Image.fromarray((a * 255).astype(np.uint8)).save(os.path.join(DBG, f"alpha_{name}.png"))
 
-# ── 鸟贴片去重：后处理的鸟扣掉前面鸟已占据的像素 ──
-acc = np.zeros((H, W), np.float32)
-for name in ["bird1", "bird2", "bird3", "bird4", "bird6"]:
+# ── 鸟贴片去重：按列归属（每个横向位置只归水平最近的鸟）──
+CENTERS = {"bird1": 190, "bird2": 420, "bird3": 650, "bird4": 940, "bird6": 1160}
+names_b = list(CENTERS.keys())
+col_arr = np.arange(W)
+owner = np.zeros(W, int)
+best = np.full(W, 1e9)
+for i, nm in enumerate(names_b):
+    d = np.abs(col_arr - CENTERS[nm])
+    m = d < best
+    owner[m] = i; best[m] = d[m]
+for i, name in enumerate(names_b):
     fp = os.path.join(OUT, f"{name}.png")
     im = np.asarray(Image.open(fp).convert("RGBA")).copy()
     x0, y0, x1, y1 = rects[name]
-    a_full = np.zeros((H, W), np.float32)
-    a_full[y0:y1, x0:x1] = im[:, :, 3].astype(np.float32) / 255
-    a_full *= (1.0 - acc)
-    im[:, :, 3] = (np.clip(a_full[y0:y1, x0:x1], 0, 1) * 255).astype(np.uint8)
+    a = im[:, :, 3].astype(np.float32) / 255
+    own_cols = (owner[x0:x1] == i)[None, :]
+    a = a * own_cols
+    im[:, :, 3] = (np.clip(a, 0, 1) * 255).astype(np.uint8)
     Image.fromarray(im, "RGBA").save(fp)
-    acc = np.maximum(acc, a_full)
-    alphas[name] = a_full[y0:y1, x0:x1]
+    alphas[name] = a
+
+# ── 横幅整体归 bird6：横幅带区域从 bird4 移除、并入 bird6 ──
+yy_z, xx_z = np.mgrid[0:H, 0:W]
+zone = (yy_z >= 660) & (yy_z <= 845) & (xx_z >= 845) & (xx_z <= 1345)
+cream2 = (R > 195) & (G > 185) & (B > 148) & (B < R + 8)
+bus_a = np.zeros((H, W), bool)
+_bus = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))[:, :, 3] > 10
+bus_a[160:830, 145:1225] = _bus
+bus_a = ndimage.binary_dilation(bus_a, iterations=3)
+# 横幅：从横幅内部播种，在「奶油|墨|红」掩码里泛洪（天空 B<150 不会泄漏）
+banner_mask = (cream2 | ink | red) & zone & ~bus_a
+seeds_b = np.zeros_like(banner_mask)
+for sx, sy in [(1000, 748), (1100, 742), (1160, 756), (930, 752), (1215, 762)]:
+    if 0 <= sy < H and 0 <= sx < W and banner_mask[sy, sx]:
+        seeds_b[sy, sx] = True
+    else:
+        # 种子没踩在掩码上时，就近找一个掩码像素
+        yy0, yy1 = max(0, sy - 8), min(H, sy + 9)
+        xx0, xx1 = max(0, sx - 8), min(W, sx + 9)
+        sub = np.argwhere(banner_mask[yy0:yy1, xx0:xx1])
+        if len(sub):
+            seeds_b[yy0 + sub[0][0], xx0 + sub[0][1]] = True
+bz = ndimage.binary_propagation(seeds_b, mask=banner_mask)
+for nm, add in (("bird4", False), ("bird6", True)):
+    fp = os.path.join(OUT, f"{nm}.png")
+    im = np.asarray(Image.open(fp).convert("RGBA")).copy()
+    x0, y0, x1, y1 = rects[nm]
+    a = im[:, :, 3].astype(np.float32) / 255
+    zc = bz[y0:y1, x0:x1].astype(np.float32)
+    a = np.maximum(a, zc) if add else a * (1 - zc)
+    im[:, :, 3] = (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    Image.fromarray(im, "RGBA").save(fp)
+    alphas[nm] = a
 
 # ── 站牌重建：牌子向右补全（含 N 字）+ 杆子重画到圆头 ──
 def rebuild_sign():
@@ -148,7 +218,7 @@ def rebuild_sign():
     art_path = os.path.join(OUT, "sign.png")
     art = np.asarray(Image.open(art_path).convert("RGBA")).copy()   # 415 x 1280
     AH, AW = art.shape[:2]
-    NEWW = 580
+    NEWW = 660
     TOPPAD = 110
     canvas = np.zeros((AH + TOPPAD, NEWW, 4), np.uint8)
 
@@ -179,7 +249,7 @@ def rebuild_sign():
     # 排除横幅右端残片（左下角区域），避免混入站牌
     yy_a, xx_a = np.mgrid[0:AH, 0:AW]
     am = am & ~((yy_a > 790) & (xx_a < 1500 - sx0))
-    am = am & ~((yy_a > 600) & (yy_a < 700) & (xx_a < 60))   # 左侧碎屑
+    am = am & ~((yy_a > 560) & (yy_a < 800) & (xx_a < 72))   # 左侧碎屑
     region = canvas[TOPPAD:TOPPAD + AH, :AW]
     region[am] = art[am]
 
