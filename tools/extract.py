@@ -158,35 +158,7 @@ for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
     checker.save(os.path.join(DBG, f"{name}_check.png"))
     Image.fromarray((a * 255).astype(np.uint8)).save(os.path.join(DBG, f"alpha_{name}.png"))
 
-# ── 鸟类贴片：全局墨迹连通块按质心就近归属（身体/脚/道具自动分组）──
-ink_clean = ink.copy()
-for ry in range(1000, min(H, 1140)):
-    idx_c = np.nonzero(ink_clean[ry])[0]
-    if len(idx_c):
-        runs = np.split(idx_c, np.nonzero(np.diff(idx_c) > 1)[0] + 1)
-        if max(len(r) for r in runs) > 120:          # 长椅横线：清除
-            ink_clean[ry, :] = False
-lab_i, _n_i = ndimage.label(ink_clean | red)
-BIRD_CENTERS = {"bird1": 229, "bird2": 437, "bird3": 631, "bird4": 890, "bird6": 1170}
-comps_by_bird = {k: [] for k in BIRD_CENTERS}
-sl_objs = ndimage.find_objects(lab_i)
-objs_ = sl_objs
-for i in range(1, _n_i + 1):
-    sl = sl_objs[i - 1]
-    if sl is None:
-        continue
-    area = int((lab_i[sl] == i).sum())
-    if area < 300:
-        continue
-    y0_, y1_ = sl[0].start, sl[0].stop
-    x0_, x1_ = sl[1].start, sl[1].stop
-    cy_, cx_ = (y0_ + y1_) / 2, (x0_ + x1_) / 2
-    if cy_ > 1150 or cy_ < 730:                 # 长椅 / 巴士等
-        continue
-    if not (60 <= cx_ <= 1380):
-        continue
-    target = min(BIRD_CENTERS, key=lambda nm: abs(cx_ - BIRD_CENTERS[nm]))
-    comps_by_bird[target].append(i)
+# ── 鸟类贴片：全局墨迹连通块按质心就近归属 ──
 def run_lengths(mask, axis):
     L = np.zeros(mask.shape, np.int32)
     if axis == 1:
@@ -207,37 +179,50 @@ def run_lengths(mask, axis):
 
 h_len = run_lengths(ink, 1)
 v_len = run_lengths(ink, 0)
-hlines = (h_len >= 40) & (v_len <= 8)      # 细长横线（长椅边），鸟身/脚不受影响
-hlines = ndimage.binary_dilation(hlines, iterations=1)
+hlines = ndimage.binary_dilation((h_len >= 40) & (v_len <= 8), iterations=1)
+
+# 清除长椅阴影带所在行（长横线密集行），鸟身都在此带之上
+ink2 = ink.copy()
+red2 = red.copy()
+for ry in range(1005, min(H, 1105)):
+    if hlines[ry].mean() > 0.10:
+        ink2[ry, :] = False
+        red2[ry, :] = False
+lab_i, _n_i = ndimage.label(ink2 | red2)
+BIRD_CENTERS = {"bird1": 229, "bird2": 437, "bird3": 631, "bird4": 890, "bird6": 1170}
+comps_by_bird = {k: [] for k in BIRD_CENTERS}
+objs_ = ndimage.find_objects(lab_i)
+for i in range(1, _n_i + 1):
+    sl = objs_[i - 1]
+    if sl is None:
+        continue
+    area = int((lab_i[sl] == i).sum())
+    if area < 300:
+        continue
+    y0_, y1_ = sl[0].start, sl[0].stop
+    x0_, x1_ = sl[1].start, sl[1].stop
+    cy_, cx_ = (y0_ + y1_) / 2, (x0_ + x1_) / 2
+    if cy_ > 1150 or cy_ < 730:
+        continue
+    if not (60 <= cx_ <= 1380):
+        continue
+    density = area / float((y1_ - y0_) * (x1_ - x0_))
+    if density < 0.15:
+        continue
+    target = min(BIRD_CENTERS, key=lambda nm: abs(cx_ - BIRD_CENTERS[nm]))
+    comps_by_bird[target].append(i)
+
 for name, ids in comps_by_bird.items():
     mask = np.zeros((H, W), bool)
-    body, bb = None, None
     if ids:
-        areas = {i: int((lab_i == objs_[i - 1] == 0).sum() if False else (lab_i[objs_[i - 1]] == i).sum()) for i in ids}
+        areas = {i: int((lab_i[objs_[i - 1]] == i).sum()) for i in ids}
         body = max(areas, key=areas.get)
         bb = objs_[body - 1]
-    for i in ids:
-        sl = objs_[i - 1]
-        w_ = sl[1].stop - sl[1].start
-        h_ = sl[0].stop - sl[0].start
-        cy_ = (sl[0].start + sl[0].stop) / 2
-        if body is not None and i == body:
-            mask |= (lab_i == i)
-            continue
-        if w_ > 60 and h_ < 20:          # 扁平宽条（长椅边/阴影条）
-            continue
-        density = (lab_i[sl] == i).sum() / float(w_ * h_)
-        if density < 0.18:               # 稀疏噪点块
-            continue
-        if cy_ < bb[0].stop + 5:         # 身体上方的道具（卡/叶/包/横幅）
-            mask |= (lab_i == i)
-    # 脚：身体下方的细竖笔画窗口
-    if body is not None:
-        rows0, rows1 = bb[0].stop - 8, min(H, slat_top + 10)
-        ccx = (bb[1].start + bb[1].stop) // 2
-        win = np.zeros_like(mask)
-        win[max(0, rows0):rows1, max(0, ccx - 90):min(W, ccx + 90)] = True
-        mask |= (ink & win & (h_len <= 14))
+        for i in ids:
+            sl = objs_[i - 1]
+            cy_ = (sl[0].start + sl[0].stop) / 2
+            if i == body or cy_ < bb[0].stop + 5:
+                mask |= (lab_i == i)
     mask &= ~hlines
     mask = ndimage.binary_fill_holes(mask)
     x0, y0, x1, y1 = rects[name]

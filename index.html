@@ -47,7 +47,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v22</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v23</p>
 </div>
 
 <div id="container"></div>
@@ -338,9 +338,9 @@ function createArtScene(meta, tex, opts = {}) {
         const e = p * p * (3 - 2 * p);                       // 平滑起步、缓缓停下
         busGroup.position.x = busStart.x * (1 - e);
         busGroup.position.y = busRest.y
-          + Math.sin(p * Math.PI) * 0.010                    // 车身起伏
-          + Math.sin(t * 8) * 0.004 * (1 - e);               // 行驶轻微震动
-        busGroup.rotation.z = (1 - e) * -0.05 + Math.sin(t * 9) * 0.005 * (1 - e);
+          + Math.sin(p * Math.PI) * 0.006                    // 轻微起伏
+          + Math.sin(t * 8) * 0.002 * (1 - e);               // 行驶微震
+        busGroup.rotation.z = 0;
         busGroup.rotation.x = 0;
       } else {
         drive = null;
@@ -350,7 +350,7 @@ function createArtScene(meta, tex, opts = {}) {
     }
     if (!driving) {
       busGroup.position.y = busRest.y + Math.sin(t * 1.1) * 0.008;
-      busGroup.rotation.z = Math.sin(t * 0.8) * 0.006;
+      busGroup.rotation.z = Math.sin(t * 0.8) * 0.004;
     }
     const wheelSpeed = driving ? (2 + (1 - driveK) * 10) : 1.2;
     wheelAngle -= wheelSpeed * dt;
