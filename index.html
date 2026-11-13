@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>黑鸟面包巴士 · 月历彩蛋</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./lib/three.module.js",
+    "three/addons/": "./lib/addons/",
+    "mindar-image-three": "./lib/mindar-image-three.prod.js"
+  }
+}
+</script>
+<link rel="modulepreload" href="./lib/three.module.js">
+<link rel="modulepreload" href="./lib/mindar-image-three.prod.js">
+<link rel="modulepreload" href="./lib/controller-mGt1s8dJ.js">
 <style>
   html, body { margin:0; padding:0; width:100%; height:100%; background:#0e0e1a; overflow:hidden;
     font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; touch-action:none; }
@@ -17,6 +29,7 @@
   #splash button { width:min(72vw, 300px); }
   #arBtn { margin-top:10px; padding:14px 20px; font-size:16px; letter-spacing:4px;
     border:none; border-radius:999px; background:#ffd34d; color:#222; font-weight:600; }
+  #arBtn:disabled { opacity:.65; }
   #vrBtn { margin-top:4px; padding:11px 20px; font-size:13px; letter-spacing:2px;
     border:1px solid #555; border-radius:999px; background:transparent; color:#bbb; }
   .bird { font-size:44px; animation: flap 1.6s ease-in-out infinite; }
@@ -47,7 +60,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v24</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v25</p>
 </div>
 
 <div id="container"></div>
@@ -58,16 +71,6 @@
   <button id="vrExit">返回</button>
   <div id="vrHint">拖动画面环视 · 手机上可移动观看</div>
 </div>
-
-<script type="importmap">
-{
-  "imports": {
-    "three": "./lib/three.module.js",
-    "three/addons/": "./lib/addons/",
-    "mindar-image-three": "./lib/mindar-image-three.prod.js"
-  }
-}
-</script>
 
 <script type="module">
 /* 重依赖懒加载：页面秒开、按钮秒响应 */
@@ -100,7 +103,12 @@ window.addEventListener('unhandledrejection', (e) => {
   const r = e.reason;
   showErr((r && (r.message || r)) || '未处理的异常');
 });
-const backToSplash = () => { splash.style.display = 'flex'; };
+const backToSplash = () => {
+  splash.style.display = 'flex';
+  const b = document.getElementById('arBtn');
+  b.disabled = false;
+  b.textContent = '开始 AR · 对准月历插画';
+};
 
 /* ── 音效（Web Audio 合成，无需外部文件） ── */
 let actx = null;
@@ -398,7 +406,15 @@ function createArtScene(meta, tex, opts = {}) {
 }
 
 /* ══════════ AR 模式 ══════════ */
-document.getElementById('arBtn').addEventListener('click', () => { ensureAudio(); startAR(); });
+document.getElementById('arBtn').addEventListener('click', () => {
+  if (arBusy) return;
+  /* 先给手指一个立即反馈，再进入异步加载 */
+  const b = document.getElementById('arBtn');
+  b.disabled = true;
+  b.textContent = '正在准备…';
+  ensureAudio();
+  startAR();
+});
 
 let arBusy = false;
 async function startAR() {
@@ -406,10 +422,15 @@ async function startAR() {
   arBusy = true;
   splash.style.display = 'none';
   statusEl.classList.remove('hidden');
-  statusEl.textContent = '正在加载识别引擎…（首次较慢，请稍候）';
+  statusEl.textContent = '正在启动识别引擎…';
+  const engineHint = setTimeout(() => {
+    statusEl.textContent = '正在加载识别引擎…（首次较慢，请稍候）';
+  }, 2000);
   try {
     await ensureMindAR();
+    clearTimeout(engineHint);
   } catch (e) {
+    clearTimeout(engineHint);
     arBusy = false;
     statusEl.textContent = '识别引擎加载失败：' + (e && e.message || e) + '，请检查网络后重试';
     setTimeout(backToSplash, 3500);
@@ -435,19 +456,8 @@ async function startAR() {
     return;
   }
 
-  statusEl.textContent = '加载插画素材…';
-  try {
-    await loadArtAssets((d, n) => { statusEl.textContent = '加载插画素材… ' + d + '/' + n; });
-  } catch (e) {
-    statusEl.textContent = '插画素材加载失败：' + (e && e.message || e);
-    setTimeout(backToSplash, 3500);
-    arBusy = false;
-    return;
-  }
-
-  statusEl.textContent = '加载识别数据… 0%';
-  let mindUrl;
-  try {
+  statusEl.textContent = '加载插画素材与识别数据…';
+  const fetchMind = async () => {
     const resp = await fetch('./assets/target.mind');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const total = +resp.headers.get('content-length') || 833135;
@@ -459,9 +469,17 @@ async function startAR() {
       chunks.push(value); got += value.length;
       statusEl.textContent = '加载识别数据… ' + Math.min(99, Math.round(got / total * 100)) + '%';
     }
-    mindUrl = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
+    return URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
+  };
+  let mindUrl;
+  try {
+    const [, url] = await Promise.all([
+      loadArtAssets().catch((e) => { throw new Error('插画素材加载失败：' + (e && e.message || e)); }),
+      fetchMind().catch((e) => { throw new Error('识别数据下载失败：' + (e && e.message || '网络错误')); }),
+    ]);
+    mindUrl = url;
   } catch (e) {
-    statusEl.textContent = '识别数据下载失败（' + (e && e.message || '网络错误') + '），请检查网络后重试';
+    statusEl.textContent = (e && e.message || '素材加载失败') + '，请检查网络后重试';
     setTimeout(backToSplash, 3500);
     arBusy = false;
     return;
@@ -679,10 +697,22 @@ async function enterVR(auto = false) {
   })();
 }
 
-/* 空闲时预加载（不阻塞按钮响应） */
-setTimeout(() => { ensureThree().then(() => loadArtAssets()).catch(() => {}); }, 500);
+/* 空闲预热：页面打开后先把识别引擎（three + MindAR）编译好，
+   点「开始 AR」时不再等 3.8MB 的下载/解析；随后再预加载插画素材。 */
+const idleRun = (fn) => {
+  if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 3000 });
+  else setTimeout(fn, 700);
+};
+const wantsVR = new URLSearchParams(location.search).get('mode') === 'vr';
+if (!wantsVR) {
+  setTimeout(() => {
+    ensureMindAR()
+      .then(() => idleRun(() => { loadArtAssets().catch(() => {}); }))
+      .catch(() => {});
+  }, 1200);
+}
 
-if (new URLSearchParams(location.search).get('mode') === 'vr') {
+if (wantsVR) {
   enterVR(true);
 }
 </script>

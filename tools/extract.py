@@ -48,6 +48,7 @@ for y in range(int(H * 0.7), H):
 print("slat_top =", slat_top)
 
 SLAT = slat_top - 12      # 鸟贴片底边：避开长椅顶部黑边
+TAIL_Y = min(H, slat_top + 55)   # 鸟贴片新底边：必须包含垂到椅面上的尾羽
 
 def feather(b, sigma=0.8):
     return np.clip(ndimage.gaussian_filter(b.astype(np.float32), sigma), 0, 1)
@@ -78,11 +79,11 @@ def keep_seed_components(mask, seeds, min_area=250):
 CROPS = {
     # name: (x0, y0, x1, y1, seeds 相对裁剪坐标, 是否填洞)
     "bus":   (145, 160, 1225, 830,  [(535, 400), (692, 613), (191, 611)], "ink"),
-    "bird1": (60,   740, 350,  slat_top + 6, [(130, 210)], False),
-    "bird2": (300,  790, 560,  slat_top + 6, [(120, 160)], False),
-    "bird3": (495,  680, 815,  slat_top + 6, [(155, 270), (80, 80)], False),
-    "bird4": (760,  790, 1085, slat_top + 6, [(120, 160), (240, 240)], False),
-    "bird6": (850,  650, 1345, slat_top + 6, [(280, 300), (235, 115)], False),
+    "bird1": (60,   740, 350,  TAIL_Y, [(130, 210)], False),
+    "bird2": (300,  790, 560,  TAIL_Y, [(120, 160)], False),
+    "bird3": (495,  680, 815,  TAIL_Y, [(155, 270), (80, 80)], False),
+    "bird4": (760,  790, 1085, TAIL_Y, [(120, 160), (240, 240)], False),
+    "bird6": (850,  650, 1345, TAIL_Y, [(280, 300), (235, 115)], False),
     "sign":  (1255, 0,   1745, 1280, None, "ink_all"),
     "bench": (55,  slat_top - 6, 1300, 1280, [(600, 60), (200, 40)], True),
 }
@@ -240,6 +241,53 @@ for name, ids in comps_by_bird.items():
     Image.fromarray(im, "RGBA").save(fp)
     alphas[name] = feather(m_c)
 
+# ── 鸟尾补全：按「列内垂直墨迹连通段」取回尾巴和脚趾 ──
+# 不能再用整行清除长椅横线：那条线上恰好压着鸟尾，横切会把尾巴一分为二。
+# 逐列找与鸟身相连的垂直墨迹段，整段保留；长椅金属连接件单独剔除。
+def extend_bird_tails():
+    dark = ndimage.binary_closing(ink | red, structure=np.ones((3, 1), bool))
+    runlab = np.zeros((H, W), np.int32)
+    nid = 0
+    for x in range(W):
+        ys = np.nonzero(dark[:, x])[0]
+        if not len(ys):
+            continue
+        for seg in np.split(ys, np.nonzero(np.diff(ys) > 1)[0] + 1):
+            nid += 1
+            runlab[seg, x] = nid
+    lut_size = nid + 1
+    HARDWARE = [(280, 1125, 352, H), (1052, 1125, 1130, H)]
+    for name in ["bird1", "bird2", "bird3", "bird4", "bird6"]:
+        x0, y0, x1, y1 = rects[name]
+        fp = os.path.join(OUT, f"{name}.png")
+        im = np.asarray(Image.open(fp).convert("RGBA")).copy()
+        a = im[:, :, 3] > 128
+        afull = np.zeros((H, W), bool)
+        afull[y0:y0 + a.shape[0], x0:x0 + a.shape[1]] = a
+        seed = afull.copy()
+        seed[SLAT - 20:, :] = False         # 只从椅面以上的鸟身取种子（避开椅面连线）
+        ids = np.unique(runlab[seed])
+        ids = ids[ids > 0]
+        if not len(ids):
+            continue
+        lut = np.zeros(lut_size, bool)
+        lut[ids] = True
+        sel = lut[runlab]
+        sel[:SLAT - 4, :] = False
+        sel[TAIL_Y:, :] = False
+        sel[:, :x0] = False
+        sel[:, x1:] = False
+        for hx0, hy0, hx1, hy1 in HARDWARE:
+            sel[hy0:hy1, hx0:hx1] = False
+        combined = afull | sel
+        af = feather(combined[y0:y1, x0:x1])
+        im[:, :, 3] = (af * 255).astype(np.uint8)
+        Image.fromarray(im, "RGBA").save(fp)
+        alphas[name] = af
+        print("tail+ %s -> y%d" % (name, int(np.nonzero(af)[0].max() + y0)))
+
+extend_bird_tails()
+
 yy_z, xx_z = np.mgrid[0:H, 0:W]
 zone = (yy_z >= 640) & (yy_z <= 880) & (xx_z >= 845) & (xx_z <= 1345)
 cream2 = (R > 195) & (G > 185) & (B > 148) & (B < 205) & (B < R + 8)
@@ -380,7 +428,9 @@ for i, (cx, cy, rad) in enumerate(wheels):
     crop[:, :, 3] = (alpha * 255).astype(np.uint8)
     Image.fromarray(crop, "RGBA").save(os.path.join(OUT, f"wheel{i}.png"))
 
-# ── 长椅：鸟占位补木色 ──
+# ── 长椅：擦掉鸟尾/脚占位 ──
+# 按行从最近的干净木纹段拷贝同样长度的像素：既补上木色，又能把长椅横线接回去，
+# 比最近邻/插值干净（不会把尾巴边缘的深色抹成一道黑烟）。
 bx0, by0, bx1, by1 = rects["bench"]
 bench = np.asarray(Image.open(os.path.join(OUT, "bench.png")).convert("RGBA")).copy()
 fill_mask = np.zeros(bench.shape[:2], bool)
@@ -390,13 +440,58 @@ for name in ["bird1", "bird2", "bird3", "bird4", "bird6"]:
     ix1, iy1 = min(ax1, bx1), min(ay1, by1)
     if ix1 <= ix0 or iy1 <= iy0:
         continue
-    a = alphas[name][iy0 - ay0:iy1 - ay0, ix0 - ax0:ix1 - ax0] > 0.3
+    a = alphas[name][iy0 - ay0:iy1 - ay0, ix0 - ax0:ix1 - ax0] > 0.15
     fill_mask[iy0 - by0:iy1 - by0, ix0 - bx0:ix1 - bx0] |= a
-fill_mask = ndimage.binary_dilation(fill_mask, iterations=3)
-valid = ~fill_mask
-inds = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
-filled = bench[inds[0], inds[1]].copy()
-bench[fill_mask] = filled[fill_mask]
+fill_mask = ndimage.binary_dilation(fill_mask, iterations=2)
+
+def _runs(mask1d):
+    idx = np.nonzero(mask1d)[0]
+    if not len(idx):
+        return []
+    return list(np.split(idx, np.nonzero(np.diff(idx) > 1)[0] + 1))
+
+bench_out = bench.copy()
+for yy in range(bench.shape[0]):
+    m = fill_mask[yy]
+    if not m.any():
+        continue
+    vruns = _runs(~m)
+    if not vruns:
+        continue
+    bright = bench[yy, :, :3].max(axis=1).astype(np.float32)
+    row_med = float(np.median(bright[~m]))
+    rgb = bench[yy, :, :3].astype(np.int16)
+    # 木色/墨线的 B 不会明显高于 R；天空和两条木条之间的蓝缝会被这条规则排除
+    woodish = rgb[:, 2] <= rgb[:, 0] + 10
+    for fr in _runs(m):
+        L = len(fr)
+        def _score(v):
+            return (abs(float(bright[v].mean()) - row_med),
+                    abs((v[0] + v[-1]) / 2 - (fr[0] + fr[-1]) / 2))
+        cand = [v for v in vruns if len(v) >= L and woodish[v].mean() > 0.8]
+        if not cand:
+            cand = [v for v in vruns if woodish[v].mean() > 0.8]
+        if cand:
+            v = min(cand, key=_score)
+            src = v[np.arange(L) % len(v)]
+        else:
+            v = max(vruns, key=len)
+            src = v[np.arange(L) % len(v)]
+        bench_out[yy, fr] = bench_out[yy, src]
+bench = bench_out
+# 补回长椅剪影内部的透明小洞：鸟尾横穿椅沿时 alpha 被挖空，木色已补但仍是透明的，
+# 鸟一跳就会露出天空。这些洞都被长椅像素包围，binary_fill_holes 正好只填内部。
+ba = bench[:, :, 3]
+holes = ndimage.binary_fill_holes(ba > 128) & ~(ba > 128)
+ba[holes] = 255
+bench[:, :, 3] = ba
+# 抗锯齿边缘混进来的天空蓝：alpha 补齐后会变成一条蓝线，替换成最近的木色/墨色
+rgb16 = bench[:, :, :3].astype(np.int16)
+blue = (rgb16[:, :, 2] > rgb16[:, :, 0] + 15) & (bench[:, :, 3] > 0)
+if blue.any():
+    inds = ndimage.distance_transform_edt(blue, return_distances=False, return_indices=True)
+    filled = bench[inds[0], inds[1]].copy()
+    bench[blue] = filled[blue]
 Image.fromarray(bench, "RGBA").save(os.path.join(OUT, "bench.png"))
 
 # ── 天空色标 ──
