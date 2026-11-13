@@ -223,6 +223,13 @@ for name, ids in comps_by_bird.items():
             cy_ = (sl[0].start + sl[0].stop) / 2
             if i == body or cy_ < bb[0].stop + 5:
                 mask |= (lab_i == i)
+        # 身体下方 ±70 列的细笔画（尾巴尖/脚趾），粗横线仍排除
+        ccx = (bb[1].start + bb[1].stop) // 2
+        rows0 = bb[0].stop
+        rows1 = min(H, slat_top + 8)
+        win = np.zeros_like(mask)
+        win[max(0, rows0):rows1, max(0, ccx - 70):min(W, ccx + 70)] = True
+        mask |= (ink & win & (h_len <= 20))
     mask &= ~hlines
     mask = ndimage.binary_fill_holes(mask)
     x0, y0, x1, y1 = rects[name]
@@ -235,7 +242,7 @@ for name, ids in comps_by_bird.items():
 
 yy_z, xx_z = np.mgrid[0:H, 0:W]
 zone = (yy_z >= 640) & (yy_z <= 880) & (xx_z >= 845) & (xx_z <= 1345)
-cream2 = (R > 195) & (G > 185) & (B > 148) & (B < R + 8)
+cream2 = (R > 195) & (G > 185) & (B > 148) & (B < 205) & (B < R + 8)
 bus_a = np.zeros((H, W), bool)
 _bus = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))[:, :, 3] > 10
 bus_a[160:830, 145:1225] = _bus
