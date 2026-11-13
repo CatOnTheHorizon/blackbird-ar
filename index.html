@@ -47,7 +47,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v18</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v19</p>
 </div>
 
 <div id="container"></div>
@@ -391,7 +391,7 @@ async function startAR() {
   try {
     camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
     clearTimeout(permHint);
-    camStream.getTracks().forEach(t => t.stop());
+    /* 不关流：这路流会直接交给 MindAR 复用，避免 iOS 二次请求摄像头的竞态 */
   } catch (e) {
     clearTimeout(permHint);
     statusEl.textContent = e && e.name === 'NotAllowedError'
@@ -445,8 +445,23 @@ async function startAR() {
   art.group.position.z = 0.01;
   anchorRoot.add(art.group);
 
-  const origVideo = mindarThree._startVideo.bind(mindarThree);
-  mindarThree._startVideo = async () => { statusEl.textContent = '启动摄像头…'; return origVideo(); };
+  /* 用预检拿到的流启动视频，绕开 MindAR 内部的二次 getUserMedia */
+  mindarThree._startVideo = () => new Promise((resolve, reject) => {
+    statusEl.textContent = '启动摄像头…';
+    const video = document.createElement('video');
+    video.setAttribute('autoplay', '');
+    video.setAttribute('muted', '');
+    video.setAttribute('playsinline', '');
+    video.style.cssText = 'position:absolute;top:0;left:0;z-index:-2;';
+    mindarThree.video = video;
+    mindarThree.container.appendChild(video);
+    if (!camStream) { reject(new Error('摄像头流不可用')); return; }
+    video.srcObject = camStream;
+    const ok = () => resolve();
+    video.addEventListener('loadedmetadata', ok, { once: true });
+    setTimeout(() => reject(new Error('摄像头视频流启动超时')), 20000);
+    if (video.play) video.play().catch(() => {});
+  });
   const origAR = mindarThree._startAR.bind(mindarThree);
   mindarThree._startAR = async () => { statusEl.textContent = '初始化识别引擎…（首次最长约 1 分钟）'; return origAR(); };
 
@@ -460,14 +475,22 @@ async function startAR() {
     hintEl.classList.remove('hidden');
   };
 
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('初始化超时（90秒）')), 90000));
+  const t0Init = Date.now();
+  const tickInit = setInterval(() => {
+    const sec = Math.round((Date.now() - t0Init) / 1000);
+    statusEl.textContent = '初始化识别引擎…已等待 ' + sec + ' 秒（首次较慢属正常）';
+  }, 5000);
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('初始化超时（150秒）')), 150000));
   try {
     await Promise.race([mindarThree.start(), timeout]);
   } catch (e) {
+    clearInterval(tickInit);
+    if (camStream) camStream.getTracks().forEach(t => t.stop());
     statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
     setTimeout(backToSplash, 4000);
     return;
   }
+  clearInterval(tickInit);
   statusEl.classList.add('hidden');
   hintEl.classList.remove('hidden');
 
