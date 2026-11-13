@@ -47,7 +47,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v19</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v20</p>
 </div>
 
 <div id="container"></div>
@@ -149,21 +149,31 @@ const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
 let ART_META = null;
 let ART_TEX = null;
 
-async function loadArtAssets() {
+let ART_LOADING = null;
+async function loadArtAssets(onProgress) {
   if (ART_META) return;
-  const meta = await (await fetch('./assets/sprites/meta.json')).json();
-  const loader = new THREE.TextureLoader();
-  const names = ['bus', 'bird1', 'bird2', 'bird3', 'bird4', 'bird6', 'sign', 'bench', 'wheel0', 'wheel1'];
-  const tex = {};
-  await Promise.all(names.map(async (n) => {
-    const t = await loader.loadAsync('./assets/sprites/' + n + '.png');
-    t.encoding = THREE.sRGBEncoding;
-    t.minFilter = THREE.LinearFilter;
-    t.generateMipmaps = false;
-    tex[n] = t;
-  }));
-  ART_META = meta;
-  ART_TEX = tex;
+  if (!ART_LOADING) {
+    ART_LOADING = (async () => {
+      const meta = await (await fetch('./assets/sprites/meta.json')).json();
+      const loader = new THREE.TextureLoader();
+      const names = ['bus', 'bird1', 'bird2', 'bird3', 'bird4', 'bird6', 'sign', 'bench', 'wheel0', 'wheel1'];
+      const tex = {};
+      let done = 0;
+      const cb = onProgress || (() => {});
+      await Promise.all(names.map(async (n) => {
+        const t = await loader.loadAsync('./assets/sprites/' + n + '.webp');
+        t.encoding = THREE.sRGBEncoding;
+        t.minFilter = THREE.LinearFilter;
+        t.generateMipmaps = false;
+        tex[n] = t;
+        done += 1;
+        cb(done, names.length);
+      }));
+      ART_META = meta;
+      ART_TEX = tex;
+    })();
+  }
+  return ART_LOADING;
 }
 
 function spriteMesh(name, meta, tex, z = 0) {
@@ -403,7 +413,7 @@ async function startAR() {
 
   statusEl.textContent = '加载插画素材…';
   try {
-    await loadArtAssets();
+    await loadArtAssets((d, n) => { statusEl.textContent = '加载插画素材… ' + d + '/' + n; });
   } catch (e) {
     statusEl.textContent = '插画素材加载失败：' + (e && e.message || e);
     setTimeout(backToSplash, 3500);
@@ -627,6 +637,9 @@ async function enterVR(auto = false) {
     requestAnimationFrame(tick);
   })();
 }
+
+/* 页面打开即预加载插画素材（之后进入 AR/VR 秒开） */
+loadArtAssets().catch(() => {});
 
 if (new URLSearchParams(location.search).get('mode') === 'vr') {
   enterVR(true);
