@@ -158,30 +158,98 @@ for name, (x0, y0, x1, y1, seeds, mode) in CROPS.items():
     checker.save(os.path.join(DBG, f"{name}_check.png"))
     Image.fromarray((a * 255).astype(np.uint8)).save(os.path.join(DBG, f"alpha_{name}.png"))
 
-# ── 鸟贴片去重：按列归属（每个横向位置只归水平最近的鸟）──
-CENTERS = {"bird1": 190, "bird2": 420, "bird3": 650, "bird4": 940, "bird6": 1160}
-names_b = list(CENTERS.keys())
-col_arr = np.arange(W)
-owner = np.zeros(W, int)
-best = np.full(W, 1e9)
-for i, nm in enumerate(names_b):
-    d = np.abs(col_arr - CENTERS[nm])
-    m = d < best
-    owner[m] = i; best[m] = d[m]
-for i, name in enumerate(names_b):
+# ── 鸟类贴片：全局墨迹连通块按质心就近归属（身体/脚/道具自动分组）──
+ink_clean = ink.copy()
+for ry in range(1000, min(H, 1140)):
+    idx_c = np.nonzero(ink_clean[ry])[0]
+    if len(idx_c):
+        runs = np.split(idx_c, np.nonzero(np.diff(idx_c) > 1)[0] + 1)
+        if max(len(r) for r in runs) > 120:          # 长椅横线：清除
+            ink_clean[ry, :] = False
+lab_i, _n_i = ndimage.label(ink_clean | red)
+BIRD_CENTERS = {"bird1": 229, "bird2": 437, "bird3": 631, "bird4": 890, "bird6": 1170}
+comps_by_bird = {k: [] for k in BIRD_CENTERS}
+sl_objs = ndimage.find_objects(lab_i)
+objs_ = sl_objs
+for i in range(1, _n_i + 1):
+    sl = sl_objs[i - 1]
+    if sl is None:
+        continue
+    area = int((lab_i[sl] == i).sum())
+    if area < 300:
+        continue
+    y0_, y1_ = sl[0].start, sl[0].stop
+    x0_, x1_ = sl[1].start, sl[1].stop
+    cy_, cx_ = (y0_ + y1_) / 2, (x0_ + x1_) / 2
+    if cy_ > 1150 or cy_ < 730:                 # 长椅 / 巴士等
+        continue
+    if not (60 <= cx_ <= 1380):
+        continue
+    target = min(BIRD_CENTERS, key=lambda nm: abs(cx_ - BIRD_CENTERS[nm]))
+    comps_by_bird[target].append(i)
+def run_lengths(mask, axis):
+    L = np.zeros(mask.shape, np.int32)
+    if axis == 1:
+        for y in range(mask.shape[0]):
+            idx_r = np.nonzero(mask[y])[0]
+            if len(idx_r) == 0:
+                continue
+            for r in np.split(idx_r, np.nonzero(np.diff(idx_r) > 1)[0] + 1):
+                L[y, r] = len(r)
+    else:
+        for x in range(mask.shape[1]):
+            idx_c2 = np.nonzero(mask[:, x])[0]
+            if len(idx_c2) == 0:
+                continue
+            for r in np.split(idx_c2, np.nonzero(np.diff(idx_c2) > 1)[0] + 1):
+                L[r, x] = len(r)
+    return L
+
+h_len = run_lengths(ink, 1)
+v_len = run_lengths(ink, 0)
+hlines = (h_len >= 40) & (v_len <= 8)      # 细长横线（长椅边），鸟身/脚不受影响
+hlines = ndimage.binary_dilation(hlines, iterations=1)
+for name, ids in comps_by_bird.items():
+    mask = np.zeros((H, W), bool)
+    body, bb = None, None
+    if ids:
+        areas = {i: int((lab_i == objs_[i - 1] == 0).sum() if False else (lab_i[objs_[i - 1]] == i).sum()) for i in ids}
+        body = max(areas, key=areas.get)
+        bb = objs_[body - 1]
+    for i in ids:
+        sl = objs_[i - 1]
+        w_ = sl[1].stop - sl[1].start
+        h_ = sl[0].stop - sl[0].start
+        cy_ = (sl[0].start + sl[0].stop) / 2
+        if body is not None and i == body:
+            mask |= (lab_i == i)
+            continue
+        if w_ > 60 and h_ < 20:          # 扁平宽条（长椅边/阴影条）
+            continue
+        density = (lab_i[sl] == i).sum() / float(w_ * h_)
+        if density < 0.18:               # 稀疏噪点块
+            continue
+        if cy_ < bb[0].stop + 5:         # 身体上方的道具（卡/叶/包/横幅）
+            mask |= (lab_i == i)
+    # 脚：身体下方的细竖笔画窗口
+    if body is not None:
+        rows0, rows1 = bb[0].stop - 8, min(H, slat_top + 10)
+        ccx = (bb[1].start + bb[1].stop) // 2
+        win = np.zeros_like(mask)
+        win[max(0, rows0):rows1, max(0, ccx - 90):min(W, ccx + 90)] = True
+        mask |= (ink & win & (h_len <= 14))
+    mask &= ~hlines
+    mask = ndimage.binary_fill_holes(mask)
+    x0, y0, x1, y1 = rects[name]
+    m_c = mask[y0:y1, x0:x1]
     fp = os.path.join(OUT, f"{name}.png")
     im = np.asarray(Image.open(fp).convert("RGBA")).copy()
-    x0, y0, x1, y1 = rects[name]
-    a = im[:, :, 3].astype(np.float32) / 255
-    own_cols = (owner[x0:x1] == i)[None, :]
-    a = a * own_cols
-    im[:, :, 3] = (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    im[:, :, 3] = (feather(m_c) * 255).astype(np.uint8)
     Image.fromarray(im, "RGBA").save(fp)
-    alphas[name] = a
+    alphas[name] = feather(m_c)
 
-# ── 横幅整体归 bird6：横幅带区域从 bird4 移除、并入 bird6 ──
 yy_z, xx_z = np.mgrid[0:H, 0:W]
-zone = (yy_z >= 660) & (yy_z <= 845) & (xx_z >= 845) & (xx_z <= 1345)
+zone = (yy_z >= 640) & (yy_z <= 880) & (xx_z >= 845) & (xx_z <= 1345)
 cream2 = (R > 195) & (G > 185) & (B > 148) & (B < R + 8)
 bus_a = np.zeros((H, W), bool)
 _bus = np.asarray(Image.open(os.path.join(OUT, "bus.png")).convert("RGBA"))[:, :, 3] > 10

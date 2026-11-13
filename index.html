@@ -47,7 +47,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v21</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v22</p>
 </div>
 
 <div id="container"></div>
@@ -70,10 +70,20 @@
 </script>
 
 <script type="module">
-import * as THREE from 'three';
-import { MindARThree } from 'mindar-image-three';
-
-THREE.ColorManagement.legacyMode = false;
+/* 重依赖懒加载：页面秒开、按钮秒响应 */
+let THREE = null;
+let MindARThree = null;
+async function ensureThree() {
+  if (!THREE) {
+    THREE = await import('three');
+    THREE.ColorManagement.legacyMode = false;
+  }
+  return THREE;
+}
+async function ensureMindAR() {
+  await ensureThree();
+  if (!MindARThree) MindARThree = (await import('mindar-image-three')).MindARThree;
+}
 
 const statusEl = document.getElementById('status');
 const hintEl   = document.getElementById('scanHint');
@@ -154,6 +164,7 @@ async function loadArtAssets(onProgress) {
   if (ART_META) return;
   if (!ART_LOADING) {
     ART_LOADING = (async () => {
+      await ensureThree();
       const meta = await (await fetch('./assets/sprites/meta.json')).json();
       const loader = new THREE.TextureLoader();
       const names = ['bus', 'bird1', 'bird2', 'bird3', 'bird4', 'bird6', 'sign', 'bench', 'wheel0', 'wheel1'];
@@ -389,9 +400,21 @@ function createArtScene(meta, tex, opts = {}) {
 /* ══════════ AR 模式 ══════════ */
 document.getElementById('arBtn').addEventListener('click', () => { ensureAudio(); startAR(); });
 
+let arBusy = false;
 async function startAR() {
+  if (arBusy) return;
+  arBusy = true;
   splash.style.display = 'none';
   statusEl.classList.remove('hidden');
+  statusEl.textContent = '正在加载识别引擎…（首次较慢，请稍候）';
+  try {
+    await ensureMindAR();
+  } catch (e) {
+    arBusy = false;
+    statusEl.textContent = '识别引擎加载失败：' + (e && e.message || e) + '，请检查网络后重试';
+    setTimeout(backToSplash, 3500);
+    return;
+  }
 
   statusEl.textContent = '请求摄像头权限…（请在弹窗中允许）';
   const permHint = setTimeout(() => {
@@ -408,6 +431,7 @@ async function startAR() {
       ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」'
       : '无法访问摄像头：' + (e && e.message || e.name || '未知错误');
     setTimeout(backToSplash, 3000);
+    arBusy = false;
     return;
   }
 
@@ -417,6 +441,7 @@ async function startAR() {
   } catch (e) {
     statusEl.textContent = '插画素材加载失败：' + (e && e.message || e);
     setTimeout(backToSplash, 3500);
+    arBusy = false;
     return;
   }
 
@@ -438,6 +463,7 @@ async function startAR() {
   } catch (e) {
     statusEl.textContent = '识别数据下载失败（' + (e && e.message || '网络错误') + '），请检查网络后重试';
     setTimeout(backToSplash, 3500);
+    arBusy = false;
     return;
   }
 
@@ -498,6 +524,7 @@ async function startAR() {
     if (camStream) camStream.getTracks().forEach(t => t.stop());
     statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
     setTimeout(backToSplash, 4000);
+    arBusy = false;
     return;
   }
   clearInterval(tickInit);
@@ -530,6 +557,7 @@ document.getElementById('vrExit').addEventListener('click', () => {
     vrState.renderer.domElement.parentNode.removeChild(vrState.renderer.domElement);
   }
   vrState = null;
+  vrBusy = false;
   backToSplash();
 });
 
@@ -554,9 +582,21 @@ document.getElementById('vrExit').addEventListener('click', () => {
   });
 }
 
+let vrBusy = false;
 async function enterVR(auto = false) {
+  if (vrBusy) return;
+  vrBusy = true;
   splash.style.display = 'none';
   vrRoot.style.display = 'block';
+  statusEl.classList.remove('hidden');
+  statusEl.textContent = '正在准备场景…';
+  try {
+    await ensureThree();
+  } catch (e) {
+    vrBusy = false;
+    showErr('加载失败：' + (e && e.message || e));
+    return;
+  }
   vrActive = true;
   yawT = 0; pitchT = 0; gyroBase = null; gyroOff = 0;
   lastInteract = performance.now();
@@ -573,6 +613,7 @@ async function enterVR(auto = false) {
   try {
     await loadArtAssets();
   } catch (e) {
+    vrBusy = false;
     showErr('插画素材加载失败：' + (e && e.message || e));
     return;
   }
@@ -608,7 +649,7 @@ async function enterVR(auto = false) {
   art.startDriveIn(0.9);
 
   vrState = { renderer, scene, camera };
-  window.__dbg = { scene, art };
+  statusEl.classList.add('hidden');
 
   const clock = new THREE.Clock();
   let yaw = 0, pitch = 0;
@@ -638,8 +679,8 @@ async function enterVR(auto = false) {
   })();
 }
 
-/* 页面打开即预加载插画素材（之后进入 AR/VR 秒开） */
-loadArtAssets().catch(() => {});
+/* 空闲时预加载（不阻塞按钮响应） */
+setTimeout(() => { ensureThree().then(() => loadArtAssets()).catch(() => {}); }, 500);
 
 if (new URLSearchParams(location.search).get('mode') === 'vr') {
   enterVR(true);
