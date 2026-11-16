@@ -431,8 +431,17 @@ await test('runtime metadata and asset / music / instancing wiring', () => {
 await test('skyPlane AR dimensions, opaque inputs, alpha/depth, and paper-plane offset', () => {
   const art = makeArt();
   const sky = art.skyPlane(meta.skyStops, meta.size);
-  near(sky.geometry.parameters.width, 1);
-  near(sky.geometry.parameters.height, 1280 / 1745);
+  near(sky.geometry.parameters.width, 1.12);
+  near(sky.geometry.parameters.height, 1.12 * 1280 / 1745);
+  assert.deepEqual(sky.material.map.repeat.toArray(), [1.12, 1.12]);
+  sky.material.map.offset.toArray().forEach(offset => near(offset, -0.06));
+  sky.material.map.updateMatrix();
+  for (const uv of [[0, 0], [0.25, 0.4], [0.5, 0.5], [1, 1]]) {
+    const expandedUV = new THREE.Vector2((uv[0] - 0.5) / 1.12 + 0.5, (uv[1] - 0.5) / 1.12 + 0.5);
+    sky.material.map.transformUv(expandedUV);
+    near(expandedUV.x, uv[0]);
+    near(expandedUV.y, 1 - uv[1], 1e-12, 'CanvasTexture flipY keeps original paper-area colours');
+  }
   assert.equal(sky.name, 'ar-backdrop');
   assert.deepEqual(sky.position.toArray(), [0, 0, -0.01]);
   assert.equal(sky.renderOrder, -100);
@@ -467,7 +476,7 @@ await test('skyPlane AR dimensions, opaque inputs, alpha/depth, and paper-plane 
   group.updateMatrixWorld(true);
   const world = sky.getWorldPosition(new THREE.Vector3());
   near(world.z, 0);
-  return { dimensions: [1, 1280 / 1745], texture: [8, 512], opacity: sky.material.opacity,
+  return { dimensions: [1.12, 1.12 * 1280 / 1745], texture: [8, 512], opacity: sky.material.opacity,
     transparent: sky.material.transparent, worldZ: world.z, opaqueStops: meta.skyStops.length };
 });
 
@@ -496,6 +505,13 @@ await test('createArtScene backdrop ordering and unchanged VR far sky', () => {
   const bare = api.createArtScene(meta, tex);
   assert.equal(bare.group.getObjectByName('ar-backdrop'), undefined);
   assert.equal(bare.group.getObjectByName('vr-sky'), undefined);
+  assert.deepEqual(ar.group.scale.toArray(), [1, 1, 1], 'only backdrop geometry grows');
+  for (const name of Object.keys(meta.rects).filter(name => !name.startsWith('wheel'))) {
+    const foregroundMesh = meshWithMap(ar.group, name), original = meshWithMap(bare.group, name);
+    assert.deepEqual(foregroundMesh.geometry.parameters, original.geometry.parameters, name + ' geometry unchanged');
+    assert.deepEqual(foregroundMesh.position.toArray(), original.position.toArray(), name + ' position unchanged');
+    assert.deepEqual(foregroundMesh.scale.toArray(), [1, 1, 1], name + ' is not enlarged');
+  }
   const both = api.createArtScene(meta, tex, { withSky: true, withBackdrop: true });
   assert.ok(both.group.getObjectByName('ar-backdrop'));
   assert.equal(both.group.getObjectByName('vr-sky'), undefined, 'backdrop takes precedence');
@@ -753,6 +769,9 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   const mindar = h.mindars[0];
   assert.deepEqual(mindar.anchorIndices, [0]);
   assert.equal(mindar.options.maxTrack, 1);
+  assert.equal(mindar.options.filterMinCF, 0.0035);
+  assert.equal(mindar.options.filterBeta, 0.025);
+  assert.equal(mindar.options.missTolerance, undefined, 'native loss tolerance is retained');
   assert.equal(mindar.anchor.group.children.length, 1);
   const group = mindar.anchor.group.children[0];
   const backdrop = group.getObjectByName('ar-backdrop');
@@ -771,22 +790,47 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   assert.deepEqual(h.urls.revoked, ['blob:node-test-mind']);
   assert.equal(mindar.renderer.getPixelRatio(), 1.5);
   assert.equal(typeof mindar.renderer.loop, 'function');
+  assert.equal(group.visible, false);
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 0, 'unrecognized anchor is not rendered');
   mindar.anchor.group.visible = true;
   mindar.anchor.onTargetFound();
+  mindar.renderer.loop();
+  assert.equal(mindar.renderer.renderCount, 0, 'found alone cannot display a stale pose');
   mindar.anchor.onTargetUpdate();
+  assert.equal(group.visible, true);
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 1);
+  const beforeHide = mindar.renderer.clearCount;
   h.document.hidden = true; h.document.dispatch('visibilitychange');
   assert.equal(mindar.renderer.loop, null);
+  assert.equal(group.visible, false);
+  assert.equal(mindar.renderer.clearCount, beforeHide + 1);
+  mindar.anchor.onTargetUpdate();
+  assert.equal(group.visible, false, 'background tracking updates cannot reveal the artwork');
   h.document.hidden = false; h.document.dispatch('visibilitychange');
   assert.equal(typeof mindar.renderer.loop, 'function');
+  mindar.renderer.loop();
+  assert.equal(mindar.renderer.renderCount, 1, 'resume waits for a new tracking callback');
+  mindar.anchor.onTargetUpdate();
+  mindar.renderer.loop();
+  assert.equal(mindar.renderer.renderCount, 2);
+  const beforeLost = mindar.renderer.clearCount;
   mindar.anchor.group.visible = false;
   mindar.anchor.onTargetLost();
-  assert.equal(mindar.renderer.clearCount, 1);
+  assert.equal(group.visible, false);
+  assert.equal(mindar.renderer.clearCount, beforeLost + 1);
+  mindar.anchor.onTargetUpdate();
+  mindar.renderer.loop();
+  assert.equal(mindar.renderer.renderCount, 2, 'lost target does not leave artwork floating');
+  mindar.anchor.group.visible = true;
+  mindar.anchor.onTargetFound();
+  mindar.anchor.onTargetUpdate();
+  mindar.renderer.loop();
+  assert.equal(group.visible, true);
+  assert.equal(mindar.renderer.renderCount, 3, 'reacquisition displays the newly reported pose');
   return { anchor: 0, backdropWorldZ: 0, cameraRequests: 1, streamReused: true,
-    hiddenLoopPaused: true, targetLostCleared: true };
+    hiddenLoopPaused: true, targetLostCleared: true, resumeWaitsForTrackingUpdate: true };
 });
 await test('startAR initialization failure releases scene/renderer and stops its stream', async () => {
   const h = makeRuntime();

@@ -68,7 +68,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v30</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v31</p>
 </div>
 
 <div id="container"></div>
@@ -80,7 +80,7 @@
   <div id="vrHint">拖动画面环视 · 手机上可移动观看</div>
 </div>
 
-<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=30" preload="none" loop playsinline></audio>
+<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=31" preload="none" loop playsinline></audio>
 <div id="musicControls">
   <span id="musicNote" aria-live="polite">Paul McCartney · Bye Bye Blackbird</span>
   <button id="musicToggle" type="button" aria-label="播放背景音乐" aria-pressed="false">♫ 开启音乐</button>
@@ -415,7 +415,7 @@ const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
 let ART_META = null;
 let ART_TEX = null;
 
-const ART_VERSION = '30';
+const ART_VERSION = '31';
 const artUrl = (name) => './assets/sprites/' + name + '?v=' + ART_VERSION;
 let ART_LOADING = null;
 async function loadArtAssets(onProgress) {
@@ -483,7 +483,7 @@ function sparkleTexture(color = '#fff6d8') {
   return t;
 }
 
-/* 天空渐变：VR 是远景；AR 是与识别图同尺寸的干净底板。 */
+/* 天空渐变：VR 是远景；AR 在识别图四边各留 6% 的遮盖余量。 */
 function skyPlane(stops, targetSize = null) {
   const cv = document.createElement('canvas');
   cv.width = 8; cv.height = 512;
@@ -494,8 +494,14 @@ function skyPlane(stops, targetSize = null) {
   const tex = new THREE.CanvasTexture(cv);
   tex.encoding = THREE.sRGBEncoding;
   tex.userData.artOwned = true;
+  const bleed = targetSize ? 1.12 : 1;
+  if (targetSize) {
+    /* 中心原画区域的渐变不拉伸；新增边缘沿用最近的天空颜色。 */
+    tex.repeat.set(bleed, bleed);
+    tex.offset.set((1 - bleed) / 2, (1 - bleed) / 2);
+  }
   const m = new THREE.Mesh(
-    new THREE.PlaneGeometry(targetSize ? 1 : 8.0, targetSize ? targetSize[1] / targetSize[0] : 6.5),
+    new THREE.PlaneGeometry(targetSize ? bleed : 8.0, targetSize ? bleed * targetSize[1] / targetSize[0] : 6.5),
     new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false })
   );
   m.name = targetSize ? 'ar-backdrop' : 'vr-sky';
@@ -789,6 +795,9 @@ async function startAR() {
     imageTargetSrc: mindUrl,
     uiLoading: 'no', uiScanning: 'no', uiError: 'no',
     maxTrack: 1,
+    /* 原生 One Euro（毫秒时基）；独立测试静止噪声与移动滞后，不叠加二次平滑。 */
+    filterMinCF: 0.0035,
+    filterBeta: 0.025,
   });
   const { renderer, scene, camera } = mindarThree;
   renderer.setPixelRatio(getRenderPixelRatio(devicePixelRatio, MOBILE_VIEW));
@@ -799,6 +808,7 @@ async function startAR() {
 
   const art = createArtScene(ART_META, ART_TEX, { withBackdrop: true, driveFromX: -1.15, driveDur: 5.2 });
   art.group.position.z = 0.01;
+  art.group.visible = false;
   anchorRoot.add(art.group);
 
   /* 用预检拿到的流启动视频，绕开 MindAR 内部的二次 getUserMedia */
@@ -829,13 +839,22 @@ async function startAR() {
     setTimeout(() => statusEl.classList.add('hidden'), 2500);
   };
   anchor.onTargetLost = () => {
+    art.group.visible = false;
     monitor.reset();
     monitor.setTracking(false);
     renderer.clear();
     statusEl.classList.add('hidden');
     hintEl.classList.remove('hidden');
   };
-  anchor.onTargetUpdate = () => { if (anchorRoot.visible) monitor.track(performance.now()); };
+  anchor.onTargetUpdate = () => {
+    if (document.hidden || !anchorRoot.visible) return;
+    if (!art.group.visible) {
+      art.group.visible = true;
+      monitor.setTracking(true);
+      hintEl.classList.add('hidden');
+    }
+    monitor.track(performance.now());
+  };
 
   const t0Init = Date.now();
   const tickInit = setInterval(() => {
@@ -876,7 +895,7 @@ async function startAR() {
   let driveStarted = false, t = 0;
   const renderAR = () => {
     const dt = clock.getDelta();
-    if (document.hidden || !anchorRoot.visible) return;
+    if (document.hidden || !anchorRoot.visible || !art.group.visible) return;
     t += dt;
     if (!driveStarted) {
       art.startDriveIn(t + 0.1);
@@ -888,7 +907,11 @@ async function startAR() {
   };
   const onARVisibility = () => {
     clock.getDelta();
+    art.group.visible = false;
+    renderer.clear();
     monitor.reset();
+    monitor.setTracking(false);
+    hintEl.classList.remove('hidden');
     renderer.setAnimationLoop(document.hidden ? null : renderAR);
   };
   document.addEventListener('visibilitychange', onARVisibility);
