@@ -17,6 +17,7 @@ ART_VERSION_RE = re.compile(
 )
 SPRITES = ["bus", "wheel0", "wheel1", "bird1", "bird2", "bird3", "bird4", "bird6", "sign", "bench"]
 TARGETS = ["target.jpg", "target-1024.jpg", "target.mind"]
+MUSIC = "bye-bye-blackbird.mp3"
 
 
 def patch_once(text, old, new):
@@ -70,6 +71,10 @@ def main():
     source_assets = project / "assets"
     if not source_index.is_file() or not source_lib.is_dir():
         raise ValueError("Expected static project root with index.html and lib/")
+    source_audio = source_assets / "audio"
+    source_music = source_audio / MUSIC
+    if not source_music.is_file() or source_music.stat().st_size == 0:
+        raise ValueError("Missing or empty background music: assets/audio/" + MUSIC)
     for name in SPRITES:
         if not (candidate / (name + ".png")).is_file() or not (candidate / (name + ".webp")).is_file():
             raise ValueError("Missing candidate sprite: " + name)
@@ -87,6 +92,10 @@ def main():
     shutil.copytree(source_lib, out / "lib")
     stage_assets = out / "assets"
     stage_assets.mkdir()
+    shutil.copytree(source_audio, stage_assets / "audio")
+    stage_music = stage_assets / "audio" / MUSIC
+    if not stage_music.is_file() or stage_music.stat().st_size == 0 or sha256(stage_music) != sha256(source_music):
+        raise ValueError("Staged background music is empty or differs from the source")
     for name in TARGETS:
         shutil.copy2(source_assets / name, stage_assets / name)
     stage_sprites = stage_assets / "sprites"
@@ -97,6 +106,7 @@ def main():
     print("Preview:", out / "index.html")
     print("Sprites:", len(SPRITES))
     print("Recognition target SHA-256:", json.dumps(manifest, sort_keys=True))
+    print("Background music SHA-256:", sha256(stage_music))
 
 
 if __name__ == "__main__":

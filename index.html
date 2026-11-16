@@ -45,11 +45,19 @@
   .hidden { opacity:0 !important; }
 
   #vrRoot { position:fixed; inset:0; z-index:20; display:none; background:#0e0e1a; }
-  #vrHint { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:41;
+  #vrHint { position:fixed; bottom:88px; left:50%; transform:translateX(-50%); z-index:41;
     color:#f5f0e6; font-size:13px; letter-spacing:2px; opacity:.75; pointer-events:none;
     text-shadow:0 1px 6px rgba(0,0,0,.8); white-space:nowrap; }
   #vrExit { position:fixed; top:14px; right:14px; z-index:41; padding:8px 16px; font-size:13px;
     border-radius:999px; border:1px solid #666; background:rgba(14,14,26,.6); color:#ddd; }
+  #musicControls { position:fixed; right:16px; bottom:max(16px, env(safe-area-inset-bottom));
+    z-index:42; max-width:calc(100vw - 32px); text-align:right; }
+  #musicToggle { min-height:42px; padding:9px 16px; border:1px solid #736c83; border-radius:999px;
+    background:rgba(14,14,26,.84); color:#f5f0e6; font-size:13px; font-family:inherit; cursor:pointer; }
+  #musicToggle[aria-pressed="true"] { border-color:#ffd34d; color:#ffd34d; }
+  #musicToggle:focus-visible { outline:2px solid #ffd34d; outline-offset:3px; }
+  #musicNote { display:block; max-width:min(330px, calc(100vw - 32px)); margin-bottom:6px;
+    font-size:10px; line-height:1.5; color:#ddd; text-shadow:0 1px 4px #000; pointer-events:none; }
 </style>
 </head>
 <body>
@@ -60,7 +68,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v29</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v30</p>
 </div>
 
 <div id="container"></div>
@@ -70,6 +78,12 @@
 <div id="vrRoot">
   <button id="vrExit">返回</button>
   <div id="vrHint">拖动画面环视 · 手机上可移动观看</div>
+</div>
+
+<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=30" preload="none" loop playsinline></audio>
+<div id="musicControls">
+  <span id="musicNote" aria-live="polite">Paul McCartney · Bye Bye Blackbird</span>
+  <button id="musicToggle" type="button" aria-label="播放背景音乐" aria-pressed="false">♫ 开启音乐</button>
 </div>
 
 <script type="module">
@@ -93,6 +107,9 @@ const hintEl   = document.getElementById('scanHint');
 const splash   = document.getElementById('splash');
 const vrRoot   = document.getElementById('vrRoot');
 const vrHint   = document.getElementById('vrHint');
+let entryMode = null;
+const music = createBackgroundMusic(document.getElementById('backgroundMusic'),
+  document.getElementById('musicToggle'), document.getElementById('musicNote'));
 
 const showErr = (msg) => {
   statusEl.classList.remove('hidden');
@@ -104,6 +121,8 @@ window.addEventListener('unhandledrejection', (e) => {
   showErr((r && (r.message || r)) || '未处理的异常');
 });
 const backToSplash = () => {
+  entryMode = null;
+  music.stop();
   splash.style.display = 'flex';
   const b = document.getElementById('arBtn');
   b.disabled = false;
@@ -240,13 +259,112 @@ function disposeArtScene(group) {
   textures.forEach(texture => texture.dispose());
 }
 
+/* ── 背景音乐：整页只用一份播放器，下载和播放都不阻塞场景。 ── */
+function createBackgroundMusic(audio, button, note) {
+  const title = 'Paul McCartney · Bye Bye Blackbird';
+  let active = false, enabled = true, gesture = false, away = document.hidden;
+  let request = 0, pending = false;
+  audio.volume = 0.35;
+  audio.loop = true;
+  audio.preload = 'none';
+  const wanted = () => active && enabled && !away && !document.hidden;
+  const update = (state, message = title) => {
+    button.dataset.state = state;
+    button.setAttribute('aria-pressed', String(state === 'playing'));
+    button.setAttribute('aria-label', state === 'playing' || state === 'loading' ? '暂停背景音乐' : '播放背景音乐');
+    button.textContent = { playing: '♫ 音乐已开', loading: '♫ 音乐加载中…', off: '♫ 音乐已关',
+      background: '♫ 后台已暂停', paused: '♫ 点击继续', blocked: '♫ 点击开启音乐',
+      unavailable: '♫ 重试音乐', idle: '♫ 开启音乐' }[state];
+    note.textContent = message;
+  };
+  const rest = () => update(!enabled ? 'off' : active && away ? 'background' : gesture && active ? 'paused' : 'idle');
+  const pause = (reset = false) => {
+    request += 1;
+    pending = false;
+    audio.pause();
+    if (reset) { try { audio.currentTime = 0; } catch {} }
+  };
+  const play = () => {
+    if (!wanted()) { rest(); return; }
+    if (!audio.paused) { update('playing'); return; }
+    if (pending) return;
+    const current = ++request;
+    pending = true;
+    update('loading', '正在缓冲音乐…画面可继续使用');
+    const failed = (error) => {
+      if (current !== request) return;
+      pending = false;
+      if (!wanted()) { pause(); rest(); return; }
+      pause();
+      update(error && error.name === 'NotAllowedError' ? 'blocked' : 'unavailable',
+        error && error.name === 'NotAllowedError' ? '浏览器需要点按一次才能播放音乐' : '音乐暂时不可用，点按可重试；画面不受影响');
+    };
+    try {
+      Promise.resolve(audio.play()).then(() => {
+        if (!wanted()) { pause(); rest(); return; }
+        if (current !== request) return;
+        pending = false;
+        update(audio.paused ? 'paused' : 'playing');
+      }, failed);
+    } catch (error) { failed(error); }
+  };
+  const enter = (fromGesture = false) => {
+    active = true;
+    away = document.hidden;
+    if (fromGesture) gesture = true;
+    if (gesture && enabled) play();
+    else rest();
+  };
+  const stop = () => {
+    active = false; gesture = false;
+    pause(true);
+    rest();
+  };
+  button.addEventListener('click', () => {
+    if (pending || !audio.paused) {
+      enabled = false;
+      pause(); rest();
+    } else {
+      enabled = true; active = true; gesture = true; away = document.hidden;
+      if (audio.error) audio.load();
+      play();
+    }
+  });
+  audio.addEventListener('playing', () => {
+    if (!wanted()) { pause(); rest(); return; }
+    pending = false;
+    update('playing');
+  });
+  audio.addEventListener('waiting', () => {
+    if (wanted()) update('loading', '正在缓冲音乐…画面可继续使用');
+  });
+  audio.addEventListener('pause', () => { if (!pending) rest(); });
+  audio.addEventListener('error', () => {
+    const report = wanted();
+    pause();
+    if (report) update('unavailable', '音乐加载失败，点按可重试；画面不受影响');
+    else rest();
+  });
+  const suspend = () => { away = true; pause(); rest(); };
+  const resume = () => {
+    away = document.hidden;
+    if (wanted() && gesture) play();
+    else rest();
+  };
+  document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); else resume(); });
+  window.addEventListener('pagehide', suspend);
+  window.addEventListener('pageshow', resume);
+  rest();
+  return { enter, stop };
+}
+
 /* ── 音效（Web Audio 合成，无需外部文件） ── */
 let actx = null;
 function ensureAudio() {
   const Ctx = window.AudioContext || window.webkitAudioContext;
   if (!Ctx) return null;
   if (!actx) actx = new Ctx();
-  if (actx.state === 'suspended') actx.resume();
+  if (actx.state === 'suspended') actx.resume().catch(() => {});
   return actx;
 }
 function playHorn() {
@@ -297,7 +415,7 @@ const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
 let ART_META = null;
 let ART_TEX = null;
 
-const ART_VERSION = '29';
+const ART_VERSION = '30';
 const artUrl = (name) => './assets/sprites/' + name + '?v=' + ART_VERSION;
 let ART_LOADING = null;
 async function loadArtAssets(onProgress) {
@@ -578,20 +696,25 @@ function createArtScene(meta, tex, opts = {}) {
 
 /* ══════════ AR 模式 ══════════ */
 document.getElementById('arBtn').addEventListener('click', () => {
-  if (arBusy) return;
+  if (arBusy || vrBusy || entryMode) return;
+  entryMode = 'AR';
+  ensureAudio();
+  music.enter(true);                 // 移动端的有声播放必须由这次真实点按触发
   /* 先给手指一个立即反馈，再进入异步加载 */
   const b = document.getElementById('arBtn');
   b.disabled = true;
   b.textContent = '正在准备…';
   requestAnimationFrame(() => {
-    setTimeout(() => { ensureAudio(); startAR(); }, 0);
+    setTimeout(() => { startAR(); }, 0);
   });
 });
 
 let arBusy = false;
 async function startAR() {
-  if (arBusy) return;
+  if (arBusy || vrBusy || entryMode === 'VR') return;
   arBusy = true;
+  entryMode = 'AR';
+  music.enter(false);
   splash.style.display = 'none';
   statusEl.classList.remove('hidden');
   statusEl.textContent = '正在启动识别引擎…';
@@ -604,6 +727,7 @@ async function startAR() {
   } catch (e) {
     clearTimeout(engineHint);
     arBusy = false;
+    music.stop();
     statusEl.textContent = '识别引擎加载失败：' + (e && e.message || e) + '，请检查网络后重试';
     setTimeout(backToSplash, 3500);
     return;
@@ -620,6 +744,7 @@ async function startAR() {
     /* 不关流：这路流会直接交给 MindAR 复用，避免 iOS 二次请求摄像头的竞态 */
   } catch (e) {
     clearTimeout(permHint);
+    music.stop();
     statusEl.textContent = e && e.name === 'NotAllowedError'
       ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」'
       : '无法访问摄像头：' + (e && e.message || e.name || '未知错误');
@@ -652,6 +777,7 @@ async function startAR() {
     mindUrl = url;
   } catch (e) {
     if (camStream) camStream.getTracks().forEach(track => track.stop());
+    music.stop();
     statusEl.textContent = (e && e.message || '素材加载失败') + '，请检查网络后重试';
     setTimeout(backToSplash, 3500);
     arBusy = false;
@@ -724,6 +850,7 @@ async function startAR() {
     await Promise.race([mindarThree.start(), timeout]);
   } catch (e) {
     clearInterval(tickInit);
+    music.stop();
     if (camStream) camStream.getTracks().forEach(t => t.stop());
     if (mindarThree.controller) mindarThree.controller.stopProcessVideo();
     renderer.setAnimationLoop(null);
@@ -819,8 +946,10 @@ document.getElementById('vrExit').addEventListener('click', exitVR);
 
 let vrBusy = false;
 async function enterVR(auto = false) {
-  if (vrBusy) return;
+  if (vrBusy || arBusy || entryMode === 'AR') return;
   vrBusy = true;
+  entryMode = 'VR';
+  music.enter(!auto);
   const request = ++vrRequest;
   splash.style.display = 'none';
   vrRoot.style.display = 'block';

@@ -21,6 +21,7 @@ ART_VERSION_RE = re.compile(
 )
 NAMES = ["bus", "wheel0", "wheel1", "bird1", "bird2", "bird3", "bird4", "bird6", "sign", "bench"]
 TARGETS = ["target.jpg", "target-1024.jpg", "target.mind"]
+MUSIC_PATH = "assets/audio/bye-bye-blackbird.mp3"
 
 
 def sha(data):
@@ -35,7 +36,11 @@ def main():
     parser.add_argument("--version", help="Optional cache-busting version; must match committed metadata")
     parser.add_argument("--attempts", type=int, default=16)
     parser.add_argument("--interval", type=int, default=15)
+    parser.add_argument("--timeout", type=float, default=60,
+                        help="Per-request timeout in seconds (default: 60); each round downloads the full MP3")
     args = parser.parse_args()
+    if args.attempts < 1 or args.interval < 0 or args.timeout <= 0:
+        parser.error("attempts must be positive, interval non-negative and timeout positive")
     parsed = urllib.parse.urlparse(args.base)
     if parsed.scheme != "https" or parsed.hostname != "catonthehorizon.github.io" or parsed.path.rstrip("/") != "/blackbird-ar":
         raise SystemExit("Verifier is restricted to the configured blackbird-ar Pages site")
@@ -67,12 +72,16 @@ def main():
     paths = ["index.html", "assets/sprites/meta.json"]
     paths.extend("assets/sprites/" + name + ".webp" for name in NAMES)
     paths.extend("assets/" + name for name in TARGETS)
+    paths.append(MUSIC_PATH)
     expected = {
         "index.html": sha(index_data),
         "assets/sprites/meta.json": sha(metadata_data),
     }
     for name in paths[2:]:
-        expected[name] = sha(committed(name))
+        data = committed(name)
+        if name == MUSIC_PATH and not data:
+            raise SystemExit("Committed background music is empty")
+        expected[name] = sha(data)
     commit = subprocess.check_output(["git", "-C", str(args.project), "rev-parse", args.revision], text=True).strip()
     base = args.base.rstrip("/") + "/"
     # GitHub is an overseas service and must use the configured Clash proxy.
@@ -87,12 +96,18 @@ def main():
             try:
                 opener = urllib.request.build_opener(proxy)
                 request = urllib.request.Request(url, headers={"Accept-Encoding": "identity", "Cache-Control": "no-cache"})
-                with opener.open(request, timeout=30) as response:
+                with opener.open(request, timeout=args.timeout) as response:
                     body = response.read()
                     actual = sha(body)
+                    content_type = response.headers.get("Content-Type", "")
+                    content_type_match = (name != MUSIC_PATH or
+                                          content_type.split(";", 1)[0].strip().lower() == "audio/mpeg")
+                    hash_match = actual == expected[name]
                     return {"path": name, "url": url, "http": response.status,
                             "bytes": len(body), "sha256": actual,
-                            "match": actual == expected[name], "age": response.headers.get("Age"),
+                            "hash_match": hash_match, "content_type": content_type,
+                            "content_type_match": content_type_match,
+                            "match": hash_match and content_type_match, "age": response.headers.get("Age"),
                             "etag": response.headers.get("ETag")}
             except (OSError, urllib.error.URLError) as error:
                 last = str(error)

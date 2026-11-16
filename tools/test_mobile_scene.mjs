@@ -170,7 +170,7 @@ function makeDOM() {
   document.body = document.createElement('body');
   const elements = {};
   for (const id of ['status', 'scanHint', 'splash', 'vrRoot', 'vrHint', 'vrExit',
-    'vrBtn', 'arBtn', 'container']) {
+    'vrBtn', 'arBtn', 'container', 'backgroundMusic', 'musicToggle', 'musicNote']) {
     elements[id] = document.createElement('div');
     elements[id].id = id;
     document.body.appendChild(elements[id]);
@@ -309,7 +309,7 @@ function makeMonitor(mobile = true, ratio = 1.5) {
 function makeRuntime() {
   const dom = makeDOM(), raf = makeRAF(), timers = makeTimers();
   const tex = textures(), renderers = [], mindars = [], mediaCalls = [], fetches = [];
-  const urls = { created: [], revoked: [] };
+  const urls = { created: [], revoked: [] }, musicCalls = [], musicInit = [];
   const loading = { three: async () => {}, assets: async () => {}, threeCalls: 0, assetCalls: 0 };
   const control = { arError: null, onARStart: () => {} };
   const track = { stops: 0, stop() { this.stops += 1; }, getSettings: () => ({ width: 1280, height: 720, frameRate: 30 }) };
@@ -346,6 +346,11 @@ function makeRuntime() {
   }
   const scope = { THREE: { ...THREE, WebGLRenderer: TestRenderer }, MindARThree: TestMindAR,
     document: dom.document, window: dom.window, Math: seededMath(),
+    createBackgroundMusic: (audio, button, note) => {
+      musicInit.push({ audio, button, note });
+      return { enter: fromGesture => musicCalls.push(['enter', fromGesture]),
+        stop: () => musicCalls.push(['stop']) };
+    },
     ART_META: meta, ART_TEX: tex, UNIT: 1 / 1745,
     pxX: px => px / 1745 - 0.5, pxY: py => (0.5 - py / 1280) * (1280 / 1745),
     MOBILE_VIEW: true, PERF_DEBUG: false, devicePixelRatio: 4, innerWidth: 390, innerHeight: 844,
@@ -384,7 +389,7 @@ function makeRuntime() {
     };
   `);
   return { ...dom, raf, timers, tex, renderers, mindars, mediaCalls, fetches, urls,
-    loading, control, track, stream, runtime };
+    musicCalls, musicInit, loading, control, track, stream, runtime };
 }
 
 const results = [];
@@ -400,12 +405,22 @@ async function test(name, run) {
   }
 }
 
-await test('v29 metadata and asset / instancing wiring', () => {
+await test('runtime metadata and asset / music / instancing wiring', () => {
   const version = /const ART_VERSION = '(\d+)';/.exec(html);
   assert.ok(version);
-  assert.equal(version[1], '29');
   assert.equal(String(meta.version), version[1]);
   assert.deepEqual(meta.size, [1745, 1280]);
+  assert.match(html, new RegExp('<audio id="backgroundMusic" src="\\./assets/audio/bye-bye-blackbird\\.mp3\\?v=' + version[1] + '" preload="none"'));
+  assert.match(html, /<span id="musicNote"/);
+  assert.match(html, /<button id="musicToggle"/);
+  assert.equal((html.match(/const music = createBackgroundMusic\(/g) || []).length, 1);
+  assert.match(html, /entryMode = null;[\s\S]*?music = createBackgroundMusic/);
+  assert.match(html, /document\.getElementById\('arBtn'\)\.addEventListener\('click',\s*\(\) => \{[\s\S]*?if \(arBusy \|\| vrBusy \|\| entryMode\) return;[\s\S]*?music\.enter\(true\)/);
+  assert.match(html, /if \(vrBusy \|\| arBusy \|\| entryMode === 'AR'\) return;/);
+  assert.match(html, /music\.enter\(false\)/);
+  assert.match(html, /music\.enter\(!auto\)/);
+  assert.match(html, /if \(wantsVR\) \{\s*enterVR\(true\);/);
+  assert.match(html, /const backToSplash = \(\) => \{\s*entryMode = null;\s*music\.stop\(\);/);
   assert.match(html, /artUrl\('meta\.json'\)/);
   assert.match(html, /artUrl\(n \+ '\.webp'\)/);
   // Only wiring is checked textually; objects, animation, and dispatch execute below.
@@ -730,6 +745,10 @@ await test('disposeArtScene releases unique owned resources, not shared ART_TEX'
 await test('startAR executes withBackdrop on anchor 0 and reuses the preflight stream', async () => {
   const h = makeRuntime();
   await h.runtime.startAR();
+  assert.equal(h.musicInit.length, 1);
+  assert.deepEqual([h.musicInit[0].audio.id, h.musicInit[0].button.id, h.musicInit[0].note.id],
+    ['backgroundMusic', 'musicToggle', 'musicNote']);
+  assert.deepEqual(h.musicCalls, [['enter', false]], 'successful startAR does not claim a user gesture');
   assert.equal(h.mindars.length, 1);
   const mindar = h.mindars[0];
   assert.deepEqual(mindar.anchorIndices, [0]);
@@ -775,6 +794,7 @@ await test('startAR initialization failure releases scene/renderer and stops its
   h.control.arError = new Error('mock initialization failure');
   h.control.onARStart = mindar => { resources = watchResources(mindar.anchor.group, Object.values(h.tex)); };
   await h.runtime.startAR();
+  assert.deepEqual(h.musicCalls, [['enter', false], ['stop']], 'AR startup failure stops music immediately');
   assert.ok(resources);
   resources.assertReleased();
   const mindar = h.mindars[0];
@@ -796,6 +816,8 @@ await test('enterVR / exitVR three real-art cycles cancel rAF, remove per-scene 
   const originalChildren = [...h.elements.vrRoot.children];
   for (let cycle = 1; cycle <= 3; cycle++) {
     await h.runtime.enterVR(false);
+    assert.equal(h.musicCalls.at(-1)?.[0], 'enter');
+    assert.equal(h.musicCalls.at(-1)?.[1], true, 'manual VR entry carries a gesture');
     const snapshot = h.runtime.snapshot(), state = snapshot.vrState;
     assert.ok(snapshot.vrActive && snapshot.vrBusy && state);
     assert.equal(h.renderers.length, cycle);

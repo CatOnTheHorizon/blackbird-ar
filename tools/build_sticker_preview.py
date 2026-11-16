@@ -77,6 +77,8 @@ def make_preview_page(project, output, art_version):
     if runtime_version(original) != art_version:
         raise ValueError("Runtime version changed while building the preview")
     text = original.replace("./lib/", Path(os.path.relpath(project / "lib", output)).as_posix() + "/")
+    audio = Path(os.path.relpath(project / "assets" / "audio", output)).as_posix() + "/"
+    text = text.replace('"./assets/audio/', '"' + audio)
     target = Path(os.path.relpath(project / "assets" / "target.mind", output)).as_posix()
     text = replace_once(text, "'./assets/target.mind'", json.dumps(target))
     # Reuse the current production runtime, including wheel and startup fixes.
