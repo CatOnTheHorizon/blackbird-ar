@@ -19,7 +19,7 @@
 - 保留 metadata/WebP 版本校验和请求缓存键，避免新页面混用浏览器缓存中的旧贴片；当前版本已升为 v30。生产页面不包含本地“只看长椅 / 鸟抬起”检查控件。
 - v29 只调整运行时；v30 继续沿用 v28 的十张贴片，不改其 PNG/WebP 内容。`target.jpg`、`target-1024.jpg`、`target.mind` 也保持不变；旧版可从 Git 历史回滚，本地另保留 `preview-v27/v26-backup/`。
 
-本地文件修改、Git 提交、推送成功、Pages 实际更新是不同阶段。发布必须等线上页面版本、metadata、十张 WebP、识别目标文件及 MP3 与提交内容逐项一致，且音频返回 `audio/mpeg`（允许附带参数）后才算完成，不能用 README 或提交状态代替验证。
+本地文件修改、Git 提交、推送成功、Pages 实际更新是不同阶段。发布必须等线上页面版本、metadata、十张 WebP、识别目标文件及 MP3 与提交内容逐项一致，且音频返回 `audio/mpeg` / `audio/mp3`（允许附带参数）后才算完成，不能用 README 或提交状态代替验证。
 
 ## 两种模式
 
@@ -37,7 +37,7 @@
 - `tools/extract_sticker_png.py`：从隔离源 PNG 生成候选，不覆盖生产资产。
 - `tools/build_sticker_preview.py`：按当前 runtime 生成带检查控件的候选；音频 URL 改写为指向项目 `assets/audio/` 的相对路径，不另复制或处理音频。
 - `tools/package_sticker_release.py`：生成无调试控件的发布暂存目录，复制 `assets/audio/`，拒绝缺失或空 MP3，并校验副本 SHA-256。
-- `tools/verify_pages_release.py`：从指定 Git 提交读取预期字节，校验线上页面、metadata、十张 WebP、三个 target 和 MP3；音频必须同时匹配 SHA-256 与 `audio/mpeg` 类型（允许附带参数）。每轮会完整下载约 10.8 MB 的 MP3，默认请求超时 60 秒，可用 `--timeout` 调整；网络错误单项最多尝试 3 次，运行工具时应给足整体等待时间。
+- `tools/verify_pages_release.py`：从指定 Git 提交读取预期字节，校验线上页面、metadata、十张 WebP、三个 target 和 MP3；音频必须同时匹配 SHA-256 与 `audio/mpeg` / `audio/mp3` 类型（允许附带参数）。每轮会完整下载约 10.8 MB 的 MP3，默认请求超时 60 秒，可用 `--timeout` 调整；网络错误单项最多尝试 3 次，运行工具时应给足整体等待时间。
 - `tools/test_wheel_scene.mjs`：无需浏览器，验证轮轴固定、正面 UV 居中、行驶距离和停车状态。
 - `tools/test_mobile_scene.mjs`：27 项 Node 回归，执行真实场景/运行时函数，覆盖底板、星点合批、相机约束回退、画质自适应、计时、暂停恢复和 VR 资源释放；音乐使用替身，浏览器/相机接口为测试替身，不代表真机通过。
 - `tools/test_background_music.mjs`：10 项独立音乐控制器回归，执行真实控制器，覆盖拒播、开关、后台恢复、退出和过期异步回调；音频及 DOM 使用测试替身。
@@ -61,4 +61,4 @@ node tools/test_background_music.mjs
 
 ## 部署
 
-GitHub Pages 从 `main` 分支根目录发布。通过系统代理使用 HTTPS Git 推送；待线上实际更新后核对启动页显示 **v30**、metadata `version` 为 `30`、十张 WebP、三个识别目标文件和 MP3 的 SHA-256 均与待发布提交一致；MP3 响应 `Content-Type` 必须为 `audio/mpeg`（允许附带参数）。手机测试用 `?v=30`，VR 用 `?mode=vr&v=30`。二次校验也会重新下载完整 MP3，请预留流量和时间。本地修改、提交或推送都不等同于 Pages 已完成更新。
+GitHub Pages 从 `main` 分支根目录发布。通过系统代理使用 HTTPS Git 推送；待线上实际更新后核对启动页显示 **v30**、metadata `version` 为 `30`、十张 WebP、三个识别目标文件和 MP3 的 SHA-256 均与待发布提交一致；MP3 响应 `Content-Type` 必须为 `audio/mpeg` / `audio/mp3`（允许附带参数）。手机测试用 `?v=30`，VR 用 `?mode=vr&v=30`。二次校验也会重新下载完整 MP3，请预留流量和时间。本地修改、提交或推送都不等同于 Pages 已完成更新。

@@ -101,7 +101,7 @@ def main():
                     actual = sha(body)
                     content_type = response.headers.get("Content-Type", "")
                     content_type_match = (name != MUSIC_PATH or
-                                          content_type.split(";", 1)[0].strip().lower() == "audio/mpeg")
+                                          content_type.split(";", 1)[0].strip().lower() in {"audio/mpeg", "audio/mp3"})
                     hash_match = actual == expected[name]
                     return {"path": name, "url": url, "http": response.status,
                             "bytes": len(body), "sha256": actual,
