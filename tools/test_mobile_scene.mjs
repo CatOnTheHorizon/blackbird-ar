@@ -119,8 +119,12 @@ class FakeElement extends FakeTarget {
     this.parentNode = null;
     this.attributes = new Map();
     this.textContent = '';
-    this.disabled = false;
-    this.removeCount = 0;
+    this.hidden = this.disabled = false;
+    this.removeCount = this.playCount = this.pauseCount = 0;
+    this.autoplay = this.muted = this.defaultMuted = this.playsInline = false;
+    this.paused = true;
+    this.readyState = this.videoWidth = this.videoHeight = 0;
+    this.srcObject = null;
     const classes = new Set();
     this.classList = { add: name => classes.add(name), remove: name => classes.delete(name),
       contains: name => classes.has(name) };
@@ -130,7 +134,12 @@ class FakeElement extends FakeTarget {
     }
   }
   get firstChild() { return this.children[0] || null; }
+  // Deliberately do not reflect muted attributes into properties: test both writes.
   setAttribute(name, value) { this.attributes.set(name, value); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  hasAttribute(name) { return this.attributes.has(name); }
+  removeAttribute(name) { this.attributes.delete(name); }
+  click() { if (!this.hidden && !this.disabled) this.dispatch('click'); }
   appendChild(child) { return this.insertBefore(child, null); }
   insertBefore(child, reference) {
     if (child.parentNode) {
@@ -152,10 +161,17 @@ class FakeElement extends FakeTarget {
     }
   }
   play() {
-    assert.equal(this.tagName, 'VIDEO');
-    queueMicrotask(() => this.dispatch('loadedmetadata'));
+    assert.ok(['VIDEO', 'AUDIO'].includes(this.tagName));
+    this.playCount += 1;
+    queueMicrotask(() => {
+      this.paused = false;
+      this.readyState = 2;
+      if (this.tagName === 'VIDEO') { this.videoWidth = 1280; this.videoHeight = 720; }
+      for (const type of ['loadedmetadata', 'loadeddata', 'playing']) this.dispatch(type);
+    });
     return Promise.resolve();
   }
+  pause() { this.pauseCount += 1; this.paused = true; }
 }
 function makeDOM() {
   const document = new FakeTarget();
@@ -170,8 +186,8 @@ function makeDOM() {
   document.body = document.createElement('body');
   const elements = {};
   for (const id of ['status', 'scanHint', 'splash', 'vrRoot', 'vrHint', 'vrExit',
-    'vrBtn', 'arBtn', 'container', 'backgroundMusic', 'musicToggle', 'musicNote']) {
-    elements[id] = document.createElement('div');
+    'vrBtn', 'arBtn', 'container', 'cameraResume', 'backgroundMusic', 'musicToggle', 'musicNote']) {
+    elements[id] = document.createElement(id === 'backgroundMusic' ? 'audio' : id === 'cameraResume' ? 'button' : 'div');
     elements[id].id = id;
     document.body.appendChild(elements[id]);
   }
@@ -179,6 +195,7 @@ function makeDOM() {
   elements.vrRoot.appendChild(elements.vrHint);
   elements.status.classList.add('hidden');
   elements.scanHint.classList.add('hidden');
+  elements.cameraResume.hidden = true;
   document.getElementById = id => { assert.ok(elements[id], 'known element ' + id); return elements[id]; };
   return { window, document, elements };
 }
@@ -217,6 +234,7 @@ class FakeRenderer {
     this.ratio = ratio;
     this.width = this.height = 0;
     this.ratioChanges = [];
+    this.clearColors = [];
     this.sizes = [];
     this.info = { render: { calls: 0 } };
     this.renderCount = this.disposeCount = this.clearCount = 0;
@@ -245,6 +263,7 @@ class FakeRenderer {
     scene.traverse(object => { if (object.isMesh && object.visible) this.info.render.calls += 1; });
   }
   clear() { this.clearCount += 1; }
+  setClearColor(color, alpha) { this.clearColors.push([color, alpha]); }
   setAnimationLoop(callback) { this.loop = callback; }
   dispose() { this.disposeCount += 1; }
 }
@@ -375,7 +394,7 @@ function makeRuntime() {
       } }) } };
     } };
   const names = [...artNames, 'getRenderPixelRatio', 'dampingFactor', 'requestCameraStream',
-    'createFrameMonitor', 'startAR', 'enterVR', 'exitVR'];
+    'createCameraPreview', 'createFrameMonitor', 'startAR', 'enterVR', 'exitVR'];
   const runtime = compile(scope, names, `
     ${between('const statusEl =', '/* ── 手机画质')}
     let arBusy = false, vrActive = false, vrState = null, vrRequest = 0, vrBusy = false;
@@ -789,8 +808,13 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   assert.equal(h.urls.created.length, 1);
   assert.deepEqual(h.urls.revoked, ['blob:node-test-mind']);
   assert.equal(mindar.renderer.getPixelRatio(), 1.5);
+  assert.deepEqual(mindar.renderer.clearColors, [[0, 0]], 'AR clears transparently over the camera');
+  assert.equal(String(mindar.renderer.domElement.style.zIndex), '1');
+  assert.equal(String(mindar.cssRenderer.domElement.style.zIndex), '2');
+  assert.equal(mindar.scene.background, null);
   assert.equal(typeof mindar.renderer.loop, 'function');
   assert.equal(group.visible, false);
+  assert.equal(mindar.video.paused, false, 'unrecognized target does not stop camera playback');
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 0, 'unrecognized anchor is not rendered');
   mindar.anchor.group.visible = true;
@@ -808,7 +832,12 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   assert.equal(mindar.renderer.clearCount, beforeHide + 1);
   mindar.anchor.onTargetUpdate();
   assert.equal(group.visible, false, 'background tracking updates cannot reveal the artwork');
+  const playsBeforeResume = mindar.video.playCount;
+  mindar.video.paused = true; // Simulate a browser suspending camera playback in the background.
   h.document.hidden = false; h.document.dispatch('visibilitychange');
+  assert.equal(mindar.video.playCount, playsBeforeResume + 1, 'visible return resumes the paused camera directly');
+  await Promise.resolve();
+  assert.equal(mindar.video.paused, false);
   assert.equal(typeof mindar.renderer.loop, 'function');
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 1, 'resume waits for a new tracking callback');
@@ -819,6 +848,7 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   mindar.anchor.group.visible = false;
   mindar.anchor.onTargetLost();
   assert.equal(group.visible, false);
+  assert.equal(mindar.video.paused, false, 'losing a target keeps the camera preview playing');
   assert.equal(mindar.renderer.clearCount, beforeLost + 1);
   mindar.anchor.onTargetUpdate();
   mindar.renderer.loop();
@@ -850,7 +880,14 @@ await test('startAR initialization failure releases scene/renderer and stops its
     assert.equal(node.parentNode, null);
     assert.equal(node.removeCount, 1);
   }
+  assert.equal(mindar.video.srcObject, null, 'failed startup disposes the shared preview');
+  assert.equal(mindar.video.paused, true);
+  for (const type of ['loadedmetadata', 'loadeddata', 'playing', 'error', 'timeupdate']) assert.equal(mindar.video.count(type), 0);
+  assert.equal(h.elements.cameraResume.count('click'), 0);
   assert.equal(h.runtime.snapshot().arBusy, false);
+  assert.equal(h.elements.status.classList.contains('hidden'), false, 'startup failure remains visible');
+  assert.match(h.elements.status.textContent, /mock initialization failure/);
+  assert.equal(h.elements.cameraResume.hidden, true);
   assert.deepEqual(h.urls.revoked, ['blob:node-test-mind']);
   return { ...resources.summary(), stoppedTracks: h.track.stops, rendererDisposals: 1 };
 });

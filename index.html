@@ -19,8 +19,13 @@
 <style>
   html, body { margin:0; padding:0; width:100%; height:100%; background:#0e0e1a; overflow:hidden;
     font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; touch-action:none; }
-  #container { position:fixed; inset:0; }
+  #container { position:fixed; inset:0; z-index:0; isolation:isolate; overflow:hidden; }
   video, canvas { position:absolute; top:0; left:0; }
+  #container > video { z-index:0; width:100%; height:100%; object-fit:cover; }
+  #container > canvas { z-index:1; background:transparent; pointer-events:none; }
+  #cameraResume { position:fixed; z-index:45; top:50%; left:50%; transform:translate(-50%,-50%);
+    padding:14px 22px; border:0; border-radius:999px; background:#ffd34d; color:#222;
+    font-size:16px; font-family:inherit; font-weight:600; }
 
   #splash { position:fixed; inset:0; z-index:30; background:#0e0e1a; color:#f5f0e6;
     display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:24px; }
@@ -68,10 +73,11 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v31</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v32</p>
 </div>
 
 <div id="container"></div>
+<button id="cameraResume" type="button" hidden>点此显示摄像头</button>
 <div id="status" class="hidden">加载中…</div>
 <div id="scanHint" class="hidden">对准月历上的「BYE BYE BLACKBIRD」插画 ✦</div>
 
@@ -80,7 +86,7 @@
   <div id="vrHint">拖动画面环视 · 手机上可移动观看</div>
 </div>
 
-<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=31" preload="none" loop playsinline></audio>
+<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=32" preload="none" loop playsinline></audio>
 <div id="musicControls">
   <span id="musicNote" aria-live="polite">Paul McCartney · Bye Bye Blackbird</span>
   <button id="musicToggle" type="button" aria-label="播放背景音乐" aria-pressed="false">♫ 开启音乐</button>
@@ -153,6 +159,97 @@ async function requestCameraStream() {
     if (error.name !== 'OverconstrainedError' && error.name !== 'ConstraintNotSatisfiedError') throw error;
     return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } });
   }
+}
+
+/* 相机预览独立于识别：拿到真实可显示帧才继续，不吞掉播放错误。 */
+function createCameraPreview(stream, container, onFailure = () => {}) {
+  const video = document.createElement('video');
+  const button = document.getElementById('cameraResume');
+  const status = document.getElementById('status');
+  video.autoplay = true;
+  video.muted = true;
+  video.defaultMuted = true;
+  video.playsInline = true;
+  for (const name of ['autoplay', 'muted', 'playsinline', 'webkit-playsinline']) video.setAttribute(name, '');
+  video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;z-index:0;';
+  container.appendChild(video);
+  let disposed = false, settled = false, playOK = false, pending = false, prompting = false, generation = 0, timer = null;
+  let resolveReady, rejectReady;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const clearTimer = () => { clearTimeout(timer); timer = null; };
+  const hasFrame = () => !video.paused && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
+  const check = () => {
+    if (disposed || !playOK || !hasFrame()) return;
+    clearTimer();
+    button.hidden = true;
+    if (prompting) { prompting = false; status.classList.add('hidden'); }
+    if (!settled) { settled = true; resolveReady(video); }
+  };
+  const fail = (error) => {
+    if (disposed) return;
+    clearTimer();
+    pending = false;
+    button.hidden = true;
+    button.disabled = false;
+    if (!settled) { settled = true; rejectReady(error); }
+    else onFailure(error);
+  };
+  const play = () => {
+    if (disposed || pending) return;
+    if (playOK && hasFrame()) { button.hidden = true; return; }
+    const current = ++generation;
+    playOK = false; pending = true;
+    button.hidden = true; button.disabled = true;
+    clearTimer();
+    timer = setTimeout(() => fail(new Error('摄像头预览超时：未收到可显示画面，请关闭其他占用相机的应用后重试')), 20000);
+    const rejected = (error) => {
+      if (disposed || current !== generation) return;
+      pending = false;
+      button.disabled = false;
+      if (error && error.name === 'NotAllowedError') {
+        clearTimer();
+        prompting = true;
+        button.hidden = false;
+        status.classList.remove('hidden');
+        status.textContent = '摄像头已授权，请点按下方按钮显示画面';
+      } else fail(new Error('摄像头播放失败：' + (error && (error.message || error.name) || '未知错误')));
+    };
+    try {
+      Promise.resolve(video.play()).then(() => {
+        if (disposed || current !== generation) return;
+        pending = false; playOK = true; button.disabled = false;
+        check();
+      }, rejected);
+    } catch (error) { rejected(error); }
+  };
+  const onError = () => fail(new Error('摄像头视频错误：' + (video.error && (video.error.message || video.error.code) || '无法读取相机画面')));
+  const events = ['loadedmetadata', 'loadeddata', 'playing', 'timeupdate'];
+  events.forEach(name => video.addEventListener(name, check));
+  video.addEventListener('error', onError);
+  button.addEventListener('click', play);
+  /* 监听器和内联播放属性先就绪，再挂同一路流，避免快设备漏掉首个事件。 */
+  video.srcObject = stream;
+  play();
+  return {
+    video, ready,
+    resume() { if (!document.hidden && video.paused) play(); },
+    dispose() {
+      if (disposed) return;
+      disposed = true; generation += 1;
+      clearTimer();
+      events.forEach(name => video.removeEventListener(name, check));
+      video.removeEventListener('error', onError);
+      button.removeEventListener('click', play);
+      button.hidden = true; button.disabled = false;
+      video.pause();
+      video.srcObject = null;
+      video.remove();
+      if (!settled) {
+        settled = true;
+        rejectReady(Object.assign(new Error('摄像头预览已取消'), { name: 'AbortError' }));
+      }
+    }
+  };
 }
 
 function createFrameMonitor(renderer, mode) {
@@ -415,7 +512,7 @@ const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
 let ART_META = null;
 let ART_TEX = null;
 
-const ART_VERSION = '31';
+const ART_VERSION = '32';
 const artUrl = (name) => './assets/sprites/' + name + '?v=' + ART_VERSION;
 let ART_LOADING = null;
 async function loadArtAssets(onProgress) {
@@ -743,23 +840,48 @@ async function startAR() {
   const permHint = setTimeout(() => {
     statusEl.textContent = '还在等待授权…请检查浏览器是否弹出了摄像头权限窗口，或刷新页面重试';
   }, 25000);
-  let camStream = null;
+  let camStream = null, preview = null, mindarThree = null, art = null, monitor = null;
+  let onARVisibility = null, tickInit = null, initTimer = null, cancelStart = null, failed = false;
+  const failAR = (error) => {
+    if (failed) return;
+    failed = true;
+    clearTimeout(permHint);
+    clearInterval(tickInit);
+    if (onARVisibility) document.removeEventListener('visibilitychange', onARVisibility);
+    if (cancelStart) cancelStart(error);
+    if (mindarThree) {
+      if (mindarThree.controller) mindarThree.controller.stopProcessVideo();
+      mindarThree.renderer.setAnimationLoop(null);
+      mindarThree.renderer.dispose();
+      mindarThree.renderer.domElement.remove();
+      mindarThree.cssRenderer.domElement.remove();
+    }
+    if (art) disposeArtScene(art.group);
+    if (monitor) monitor.dispose();
+    if (preview) preview.dispose();
+    if (camStream) camStream.getTracks().forEach(track => track.stop());
+    music.stop();
+    hintEl.classList.add('hidden');
+    statusEl.classList.remove('hidden');
+    statusEl.textContent = '相机或 AR 启动失败：' + (error && (error.message || error.name) || '未知错误') + '，请重试';
+    arBusy = false;
+    setTimeout(backToSplash, 4000);
+  };
   try {
     camStream = await requestCameraStream();
     clearTimeout(permHint);
-    /* 不关流：这路流会直接交给 MindAR 复用，避免 iOS 二次请求摄像头的竞态 */
+    statusEl.textContent = '启动摄像头预览…';
+    preview = createCameraPreview(camStream, document.getElementById('container'), failAR);
+    await preview.ready;
+    /* 先看到真实相机帧，再下载识别素材；后续复用这一路视频。 */
   } catch (e) {
-    clearTimeout(permHint);
-    music.stop();
-    statusEl.textContent = e && e.name === 'NotAllowedError'
-      ? '摄像头权限被拒绝：请刷新页面并在弹窗中点「允许」'
-      : '无法访问摄像头：' + (e && e.message || e.name || '未知错误');
-    setTimeout(backToSplash, 3000);
-    arBusy = false;
+    failAR(e && e.name === 'NotAllowedError' ? new Error('摄像头权限被拒绝，请允许相机访问') : e);
     return;
   }
 
-  statusEl.textContent = '加载插画素材与识别数据…';
+  if (failed) return;
+  statusEl.classList.remove('hidden');
+  statusEl.textContent = '相机已启动，加载插画素材与识别数据…';
   const fetchMind = async () => {
     const resp = await fetch('./assets/target.mind');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -769,10 +891,13 @@ async function startAR() {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (failed) throw new Error('摄像头预览已停止');
       chunks.push(value); got += value.length;
       statusEl.textContent = '加载识别数据… ' + Math.min(99, Math.round(got / total * 100)) + '%';
     }
-    return URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
+    if (failed) throw new Error('摄像头预览已停止');
+    mindUrl = URL.createObjectURL(new Blob(chunks, { type: 'application/octet-stream' }));
+    return mindUrl;
   };
   let mindUrl;
   try {
@@ -782,15 +907,13 @@ async function startAR() {
     ]);
     mindUrl = url;
   } catch (e) {
-    if (camStream) camStream.getTracks().forEach(track => track.stop());
-    music.stop();
-    statusEl.textContent = (e && e.message || '素材加载失败') + '，请检查网络后重试';
-    setTimeout(backToSplash, 3500);
-    arBusy = false;
+    if (mindUrl) URL.revokeObjectURL(mindUrl);
+    failAR(e);
     return;
   }
+  if (failed) { if (mindUrl) URL.revokeObjectURL(mindUrl); return; }
 
-  const mindarThree = new MindARThree({
+  mindarThree = new MindARThree({
     container: document.getElementById('container'),
     imageTargetSrc: mindUrl,
     uiLoading: 'no', uiScanning: 'no', uiError: 'no',
@@ -800,38 +923,33 @@ async function startAR() {
     filterBeta: 0.025,
   });
   const { renderer, scene, camera } = mindarThree;
+  renderer.setClearColor(0x000000, 0);
+  renderer.domElement.style.zIndex = '1';
+  mindarThree.cssRenderer.domElement.style.zIndex = '2';
+  mindarThree.cssRenderer.domElement.style.pointerEvents = 'none';
+  scene.background = null;
   renderer.setPixelRatio(getRenderPixelRatio(devicePixelRatio, MOBILE_VIEW));
-  const monitor = createFrameMonitor(renderer, 'AR');
+  monitor = createFrameMonitor(renderer, 'AR');
   monitor.setCamera(camStream.getVideoTracks()[0].getSettings());
   const anchor = mindarThree.addAnchor(0);
   const anchorRoot = anchor.group || anchor;
 
-  const art = createArtScene(ART_META, ART_TEX, { withBackdrop: true, driveFromX: -1.15, driveDur: 5.2 });
+  art = createArtScene(ART_META, ART_TEX, { withBackdrop: true, driveFromX: -1.15, driveDur: 5.2 });
   art.group.position.z = 0.01;
   art.group.visible = false;
   anchorRoot.add(art.group);
 
-  /* 用预检拿到的流启动视频，绕开 MindAR 内部的二次 getUserMedia */
-  mindarThree._startVideo = () => new Promise((resolve, reject) => {
-    statusEl.textContent = '启动摄像头…';
-    const video = document.createElement('video');
-    video.setAttribute('autoplay', '');
-    video.setAttribute('muted', '');
-    video.setAttribute('playsinline', '');
-    video.style.cssText = 'position:absolute;top:0;left:0;z-index:-2;';
-    mindarThree.video = video;
-    mindarThree.container.appendChild(video);
-    if (!camStream) { reject(new Error('摄像头流不可用')); return; }
-    video.srcObject = camStream;
-    const timer = setTimeout(() => reject(new Error('摄像头视频流启动超时')), 20000);
-    const ok = () => { clearTimeout(timer); resolve(); };
-    video.addEventListener('loadedmetadata', ok, { once: true });
-    if (video.play) video.play().catch(() => {});
-  });
+  /* 复用已经显示首帧的预览，不再创建视频或二次请求相机。 */
+  mindarThree._startVideo = async () => {
+    if (failed) throw new Error('摄像头预览已停止');
+    mindarThree.video = preview.video;
+    await preview.ready;
+  };
   const origAR = mindarThree._startAR.bind(mindarThree);
   mindarThree._startAR = async () => { statusEl.textContent = '初始化识别引擎…（首次最长约 1 分钟）'; return origAR(); };
 
   anchor.onTargetFound = () => {
+    if (failed) return;
     monitor.reset();
     monitor.setTracking(true);
     statusEl.textContent = '✦ 彩蛋解锁 ✦';
@@ -839,6 +957,7 @@ async function startAR() {
     setTimeout(() => statusEl.classList.add('hidden'), 2500);
   };
   anchor.onTargetLost = () => {
+    if (failed) return;
     art.group.visible = false;
     monitor.reset();
     monitor.setTracking(false);
@@ -847,7 +966,7 @@ async function startAR() {
     hintEl.classList.remove('hidden');
   };
   anchor.onTargetUpdate = () => {
-    if (document.hidden || !anchorRoot.visible) return;
+    if (failed || document.hidden || preview.video.paused || preview.video.readyState < 2 || !anchorRoot.visible) return;
     if (!art.group.visible) {
       art.group.visible = true;
       monitor.setTracking(true);
@@ -857,33 +976,28 @@ async function startAR() {
   };
 
   const t0Init = Date.now();
-  const tickInit = setInterval(() => {
+  tickInit = setInterval(() => {
     const sec = Math.round((Date.now() - t0Init) / 1000);
     statusEl.textContent = '初始化识别引擎…已等待 ' + sec + ' 秒（首次较慢属正常）';
   }, 5000);
-  let initTimer;
   const timeout = new Promise((_, rej) => {
     initTimer = setTimeout(() => rej(new Error('初始化超时（150秒）')), 150000);
   });
+  const cancelled = new Promise((_, reject) => { cancelStart = reject; });
+  const starting = mindarThree.start();
+  /* 超时/视频出错后的晚到初始化不得重新启动跟踪循环。 */
+  starting.then(() => {
+    if (failed && mindarThree.controller) mindarThree.controller.stopProcessVideo();
+  }, () => {});
   try {
-    await Promise.race([mindarThree.start(), timeout]);
+    await Promise.race([starting, timeout, cancelled]);
+    if (failed) return;
   } catch (e) {
-    clearInterval(tickInit);
-    music.stop();
-    if (camStream) camStream.getTracks().forEach(t => t.stop());
-    if (mindarThree.controller) mindarThree.controller.stopProcessVideo();
-    renderer.setAnimationLoop(null);
-    disposeArtScene(art.group);
-    monitor.dispose();
-    renderer.dispose();
-    renderer.domElement.remove();
-    mindarThree.cssRenderer.domElement.remove();
-    if (mindarThree.video) mindarThree.video.remove();
-    statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
-    setTimeout(backToSplash, 4000);
-    arBusy = false;
+    failAR(e);
     return;
   } finally {
+    cancelStart = null;
+    clearInterval(tickInit);
     clearTimeout(initTimer);
     URL.revokeObjectURL(mindUrl);
   }
@@ -895,7 +1009,7 @@ async function startAR() {
   let driveStarted = false, t = 0;
   const renderAR = () => {
     const dt = clock.getDelta();
-    if (document.hidden || !anchorRoot.visible || !art.group.visible) return;
+    if (failed || document.hidden || preview.video.paused || preview.video.readyState < 2 || !anchorRoot.visible || !art.group.visible) return;
     t += dt;
     if (!driveStarted) {
       art.startDriveIn(t + 0.1);
@@ -905,13 +1019,15 @@ async function startAR() {
     renderer.render(scene, camera);
     monitor.frame(performance.now(), t);
   };
-  const onARVisibility = () => {
+  onARVisibility = () => {
+    if (failed) return;
     clock.getDelta();
     art.group.visible = false;
     renderer.clear();
     monitor.reset();
     monitor.setTracking(false);
     hintEl.classList.remove('hidden');
+    if (!document.hidden) preview.resume();
     renderer.setAnimationLoop(document.hidden ? null : renderAR);
   };
   document.addEventListener('visibilitychange', onARVisibility);
