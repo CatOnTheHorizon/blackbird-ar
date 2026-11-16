@@ -8,9 +8,13 @@ Run with Python 3.10 -I and --out pointing to a new directory.
 import argparse
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
+ART_VERSION_RE = re.compile(
+    r"(?m)^\s*const\s+ART_VERSION\s*=\s*(['\"])([0-9]+)\1\s*;"
+)
 SPRITES = ["bus", "wheel0", "wheel1", "bird1", "bird2", "bird3", "bird4", "bird6", "sign", "bench"]
 TARGETS = ["target.jpg", "target-1024.jpg", "target.mind"]
 
@@ -29,10 +33,18 @@ def sha256(path):
     return h.hexdigest()
 
 
+def runtime_version(text):
+    matches = ART_VERSION_RE.findall(text)
+    if len(matches) != 1:
+        raise ValueError("Expected one numeric ART_VERSION in index.html")
+    return matches[0][1]
+
+
 def build_index(source):
     text = source.read_text(encoding="utf-8")
-    if '>v28</p>' not in text or "const ART_VERSION = '28';" not in text:
-        raise ValueError('Expected the current v28 production runtime')
+    art_version = runtime_version(text)
+    if f">v{art_version}</p>" not in text:
+        raise ValueError("Runtime version badge does not match ART_VERSION")
     if "previewChecks" in text or "__stickerPreview" in text or "window.__previewMetrics" in text:
         raise ValueError("Preview-only diagnostics must not enter release HTML")
     return text
@@ -64,8 +76,12 @@ def main():
     if not (candidate / "meta.json").is_file():
         raise ValueError("Candidate metadata is missing")
     meta = json.loads((candidate / "meta.json").read_text(encoding="utf-8"))
-    if str(meta.get("version")) != "28" or len(meta.get("wheelFaces", [])) != 2:
-        raise ValueError("Candidate must match the v28 runtime and wheel-face metadata")
+    metadata_version = str(meta.get("version", ""))
+    if not metadata_version.isdigit() or len(meta.get("wheelFaces", [])) != 2:
+        raise ValueError("Candidate metadata must have a numeric version and two wheel faces")
+    index_text = build_index(source_index)
+    if runtime_version(index_text) != metadata_version:
+        raise ValueError("Runtime ART_VERSION does not match candidate metadata")
 
     out.mkdir(parents=True, exist_ok=False)
     shutil.copytree(source_lib, out / "lib")
@@ -75,7 +91,7 @@ def main():
         shutil.copy2(source_assets / name, stage_assets / name)
     stage_sprites = stage_assets / "sprites"
     shutil.copytree(candidate, stage_sprites)
-    (out / "index.html").write_text(build_index(source_index), encoding="utf-8")
+    (out / "index.html").write_text(index_text, encoding="utf-8")
     manifest = {name: sha256(stage_assets / name) for name in TARGETS}
     print("Release stage:", out)
     print("Preview:", out / "index.html")

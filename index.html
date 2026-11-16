@@ -60,7 +60,7 @@
   <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v28</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v29</p>
 </div>
 
 <div id="container"></div>
@@ -109,6 +109,136 @@ const backToSplash = () => {
   b.disabled = false;
   b.textContent = '开始 AR · 对准月历插画';
 };
+
+/* ── 手机画质与本机诊断（?debug=1，不上传数据） ── */
+const MOBILE_VIEW = matchMedia('(pointer: coarse)').matches
+  || /Android|iPhone|iPad|iPod/.test(navigator.userAgent);
+const PERF_DEBUG = new URLSearchParams(location.search).get('debug') === '1';
+
+function getRenderPixelRatio(dpr, mobile) {
+  const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  return Math.min(ratio, mobile ? 1.5 : 2);
+}
+
+function dampingFactor(dt) {
+  return 1 - Math.exp(-5 * Math.max(0, Math.min(dt, 0.1)));
+}
+
+async function requestCameraStream() {
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+      facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 },
+      frameRate: { ideal: 30, max: 30 }
+    } });
+  } catch (error) {
+    if (error.name !== 'OverconstrainedError' && error.name !== 'ConstraintNotSatisfiedError') throw error;
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment' } });
+  }
+}
+
+function createFrameMonitor(renderer, mode) {
+  const size = new THREE.Vector2();
+  const stats = { mode, fps: null, frameMs: null, trackingMs: null, tracking: false,
+    pixelRatio: renderer.getPixelRatio(), drawCalls: 0, canvas: null, camera: null };
+  let panel = null;
+  if (PERF_DEBUG) {
+    panel = document.createElement('output');
+    panel.setAttribute('aria-label', '本机性能诊断');
+    panel.style.cssText = 'position:fixed;left:10px;bottom:65px;z-index:45;padding:8px 10px;'
+      + 'color:#fff;background:rgba(14,14,26,.78);font:11px/1.6 monospace;white-space:pre;pointer-events:none;';
+    document.body.appendChild(panel);
+    window.__blackbirdPerf = stats;
+  }
+  const publish = () => {
+    if (!panel) return;
+    const camera = stats.camera;
+    panel.textContent = mode + ' · ' + (stats.fps == null ? '等待画面' : stats.fps + ' fps / ' + stats.frameMs + ' ms')
+      + '\nDPR ' + stats.pixelRatio + ' · ' + stats.drawCalls + ' draws'
+      + (stats.canvas ? ' · ' + stats.canvas.join('×') : '')
+      + (mode === 'AR' ? '\n跟踪 ' + (stats.tracking ? (stats.trackingMs == null ? '采样中' : stats.trackingMs + ' ms/次') : '未识别') : '')
+      + (camera ? '\n相机 ' + camera.width + '×' + camera.height + ' / ' + (camera.frameRate || '?') + ' fps' : '');
+  };
+  let previous = null, started = null, frames = 0, totalMs = 0, slow = 0, slowWindows = 0;
+  let previousTrack = null, trackMs = 0, trackSamples = 0, warmup = true;
+  const reset = () => {
+    previous = started = previousTrack = null;
+    frames = totalMs = slow = trackMs = trackSamples = slowWindows = 0;
+    warmup = true;
+  };
+  publish();
+  return {
+    stats,
+    reset,
+    setCamera(settings) {
+      stats.camera = { width: settings.width, height: settings.height, frameRate: settings.frameRate };
+      publish();
+    },
+    setTracking(visible) {
+      stats.tracking = visible;
+      stats.trackingMs = null;
+      previousTrack = null; trackMs = trackSamples = 0;
+      publish();
+    },
+    track(now) {
+      if (previousTrack != null && now > previousTrack) {
+        trackMs += now - previousTrack; trackSamples += 1;
+      }
+      previousTrack = now;
+    },
+    frame(now, animationTime) {
+      if (PERF_DEBUG) {
+        stats.renderedFrames = (stats.renderedFrames || 0) + 1;
+        stats.animationTime = Math.round(animationTime * 1000) / 1000;
+        stats.lastFrameAt = now;
+      }
+      if (previous != null) {
+        const dt = now - previous;
+        totalMs += dt; frames += 1;
+        if (dt > 25) slow += 1;
+      }
+      previous = now;
+      if (started == null) started = now;
+      if (now - started < 2000 || !frames) return;
+      stats.frameMs = Math.round(totalMs / frames * 10) / 10;
+      stats.fps = Math.round(frames * 1000 / totalMs);
+      stats.trackingMs = trackSamples ? Math.round(trackMs / trackSamples * 10) / 10 : null;
+      /* 跳过首次编译窗口；连续两个慢窗口才降低绘制像素，避免频繁跳档。 */
+      slowWindows = !warmup && stats.frameMs > 24 && slow / frames > 0.25 ? slowWindows + 1 : 0;
+      if (MOBILE_VIEW && slowWindows >= 2 && renderer.getPixelRatio() > 1) {
+        renderer.setPixelRatio(Math.max(1, renderer.getPixelRatio() - 0.25));
+        slowWindows = 0;
+      }
+      warmup = false;
+      renderer.getDrawingBufferSize(size);
+      stats.pixelRatio = renderer.getPixelRatio();
+      stats.canvas = [size.x, size.y];
+      stats.drawCalls = renderer.info.render.calls;
+      publish();
+      started = now; frames = totalMs = slow = trackMs = trackSamples = 0;
+    },
+    dispose() {
+      if (panel) panel.remove();
+      if (PERF_DEBUG && window.__blackbirdPerf === stats) delete window.__blackbirdPerf;
+    }
+  };
+}
+
+function disposeArtScene(group) {
+  const geometries = new Set(), materials = new Set(), textures = new Set();
+  group.traverse(object => {
+    if (object.geometry) geometries.add(object.geometry);
+    const list = Array.isArray(object.material) ? object.material : [object.material];
+    list.forEach(material => {
+      if (!material) return;
+      materials.add(material);
+      if (material.map && material.map.userData.artOwned) textures.add(material.map);
+    });
+    if (object.isInstancedMesh) object.dispose();
+  });
+  geometries.forEach(geometry => geometry.dispose());
+  materials.forEach(material => material.dispose());
+  textures.forEach(texture => texture.dispose());
+}
 
 /* ── 音效（Web Audio 合成，无需外部文件） ── */
 let actx = null;
@@ -167,7 +297,7 @@ const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
 let ART_META = null;
 let ART_TEX = null;
 
-const ART_VERSION = '28';
+const ART_VERSION = '29';
 const artUrl = (name) => './assets/sprites/' + name + '?v=' + ART_VERSION;
 let ART_LOADING = null;
 async function loadArtAssets(onProgress) {
@@ -231,11 +361,12 @@ function sparkleTexture(color = '#fff6d8') {
   ctx.fill();
   const t = new THREE.CanvasTexture(cv);
   t.encoding = THREE.sRGBEncoding;
+  t.userData.artOwned = true;
   return t;
 }
 
-/* 天空渐变平面（取自原画采样色） */
-function skyPlane(stops) {
+/* 天空渐变：VR 是远景；AR 是与识别图同尺寸的干净底板。 */
+function skyPlane(stops, targetSize = null) {
   const cv = document.createElement('canvas');
   cv.width = 8; cv.height = 512;
   const ctx = cv.getContext('2d');
@@ -244,36 +375,51 @@ function skyPlane(stops) {
   ctx.fillStyle = g; ctx.fillRect(0, 0, 8, 512);
   const tex = new THREE.CanvasTexture(cv);
   tex.encoding = THREE.sRGBEncoding;
+  tex.userData.artOwned = true;
   const m = new THREE.Mesh(
-    new THREE.PlaneGeometry(8.0, 6.5),
-    new THREE.MeshBasicMaterial({ map: tex })
+    new THREE.PlaneGeometry(targetSize ? 1 : 8.0, targetSize ? targetSize[1] / targetSize[0] : 6.5),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false })
   );
-  m.position.set(0, 0.3, -3.6);
+  m.name = targetSize ? 'ar-backdrop' : 'vr-sky';
+  /* AR 场景整体 z=0.01，底板抵消它，准确落回纸面而不是挡住整屏相机。 */
+  m.position.set(0, targetSize ? 0 : 0.3, targetSize ? -0.01 : -3.6);
+  m.renderOrder = -100;
   return m;
 }
 
 function createArtScene(meta, tex, opts = {}) {
-  const { withSky = false, driveFromX = 1.35, driveDur = 4.2 } = opts;
+  const { withSky = false, withBackdrop = false, driveFromX = 1.35, driveDur = 4.2 } = opts;
   const group = new THREE.Group();
-  const animatables = [];
 
-  if (withSky) group.add(skyPlane(meta.skyStops));
+  if (withBackdrop) group.add(skyPlane(meta.skyStops, meta.size));
+  else if (withSky) group.add(skyPlane(meta.skyStops));
 
-  /* —— 星星（闪烁） —— */
+  /* —— 24 颗星星合批绘制，保留各自的位置、大小和闪烁节奏。 —— */
   const sparkTex = sparkleTexture();
   const stars = [];
+  const starMesh = new THREE.InstancedMesh(
+    new THREE.PlaneGeometry(0.055, 0.055),
+    new THREE.MeshBasicMaterial({ map: sparkTex, transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending }), 24
+  );
+  starMesh.name = 'sparkles';
+  starMesh.renderOrder = -10;
+  starMesh.frustumCulled = false;
+  starMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  const starTransform = new THREE.Object3D();
+  const starColor = new THREE.Color();
   for (let i = 0; i < 24; i++) {
-    const s = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.055, 0.055),
-      new THREE.MeshBasicMaterial({ map: sparkTex, transparent: true, depthWrite: false, opacity: 0.9 })
-    );
-    s.position.set((Math.random() - 0.5) * 1.1,
-                   -0.02 + Math.random() * 0.45,
-                   -1.0 + Math.random() * 0.45);
-    s.userData = { ph: Math.random() * Math.PI * 2, base: 0.5 + Math.random() * 0.8 };
+    const s = { x: (Math.random() - 0.5) * 1.1, y: -0.02 + Math.random() * 0.45,
+      z: -1.0 + Math.random() * 0.45, ph: Math.random() * Math.PI * 2,
+      base: 0.5 + Math.random() * 0.8 };
     stars.push(s);
-    group.add(s);
+    starTransform.position.set(s.x, s.y, s.z);
+    starTransform.updateMatrix();
+    starMesh.setMatrixAt(i, starTransform.matrix);
+    starMesh.setColorAt(i, starColor.setRGB(1, 1, 1));
   }
+  starMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  group.add(starMesh);
 
   /* —— 站牌（绕底部支点轻摆） —— */
   const signZ = 0.012;
@@ -409,12 +555,18 @@ function createArtScene(meta, tex, opts = {}) {
     signGroup.rotation.y = signRotY;
     signGroup.rotation.z = Math.sin(t * 0.7) * 0.008;
 
-    /* 星星闪烁 */
-    stars.forEach(s => {
-      const k = 0.5 + 0.5 * Math.sin(t * 2.2 + s.userData.ph);
-      s.scale.setScalar(0.5 + k * s.userData.base);
-      s.material.opacity = 0.35 + k * 0.6;
+    /* 星星闪烁：更新实例缓冲，不再逐颗提交绘制。 */
+    stars.forEach((s, i) => {
+      const k = 0.5 + 0.5 * Math.sin(t * 2.2 + s.ph);
+      const light = 0.35 + k * 0.6;
+      starTransform.position.set(s.x, s.y, s.z);
+      starTransform.scale.setScalar(0.5 + k * s.base);
+      starTransform.updateMatrix();
+      starMesh.setMatrixAt(i, starTransform.matrix);
+      starMesh.setColorAt(i, starColor.setRGB(light, light, light));
     });
+    starMesh.instanceMatrix.needsUpdate = true;
+    starMesh.instanceColor.needsUpdate = true;
   };
 
   const startDriveIn = (t0) => {
@@ -463,7 +615,7 @@ async function startAR() {
   }, 25000);
   let camStream = null;
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    camStream = await requestCameraStream();
     clearTimeout(permHint);
     /* 不关流：这路流会直接交给 MindAR 复用，避免 iOS 二次请求摄像头的竞态 */
   } catch (e) {
@@ -513,10 +665,13 @@ async function startAR() {
     maxTrack: 1,
   });
   const { renderer, scene, camera } = mindarThree;
+  renderer.setPixelRatio(getRenderPixelRatio(devicePixelRatio, MOBILE_VIEW));
+  const monitor = createFrameMonitor(renderer, 'AR');
+  monitor.setCamera(camStream.getVideoTracks()[0].getSettings());
   const anchor = mindarThree.addAnchor(0);
   const anchorRoot = anchor.group || anchor;
 
-  const art = createArtScene(ART_META, ART_TEX, { withSky: false, driveFromX: -1.15, driveDur: 5.2 });
+  const art = createArtScene(ART_META, ART_TEX, { withBackdrop: true, driveFromX: -1.15, driveDur: 5.2 });
   art.group.position.z = 0.01;
   anchorRoot.add(art.group);
 
@@ -532,78 +687,116 @@ async function startAR() {
     mindarThree.container.appendChild(video);
     if (!camStream) { reject(new Error('摄像头流不可用')); return; }
     video.srcObject = camStream;
-    const ok = () => resolve();
+    const timer = setTimeout(() => reject(new Error('摄像头视频流启动超时')), 20000);
+    const ok = () => { clearTimeout(timer); resolve(); };
     video.addEventListener('loadedmetadata', ok, { once: true });
-    setTimeout(() => reject(new Error('摄像头视频流启动超时')), 20000);
     if (video.play) video.play().catch(() => {});
   });
   const origAR = mindarThree._startAR.bind(mindarThree);
   mindarThree._startAR = async () => { statusEl.textContent = '初始化识别引擎…（首次最长约 1 分钟）'; return origAR(); };
 
   anchor.onTargetFound = () => {
+    monitor.reset();
+    monitor.setTracking(true);
     statusEl.textContent = '✦ 彩蛋解锁 ✦';
     hintEl.classList.add('hidden');
     setTimeout(() => statusEl.classList.add('hidden'), 2500);
   };
   anchor.onTargetLost = () => {
+    monitor.reset();
+    monitor.setTracking(false);
+    renderer.clear();
     statusEl.classList.add('hidden');
     hintEl.classList.remove('hidden');
   };
+  anchor.onTargetUpdate = () => { if (anchorRoot.visible) monitor.track(performance.now()); };
 
   const t0Init = Date.now();
   const tickInit = setInterval(() => {
     const sec = Math.round((Date.now() - t0Init) / 1000);
     statusEl.textContent = '初始化识别引擎…已等待 ' + sec + ' 秒（首次较慢属正常）';
   }, 5000);
-  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('初始化超时（150秒）')), 150000));
+  let initTimer;
+  const timeout = new Promise((_, rej) => {
+    initTimer = setTimeout(() => rej(new Error('初始化超时（150秒）')), 150000);
+  });
   try {
     await Promise.race([mindarThree.start(), timeout]);
   } catch (e) {
     clearInterval(tickInit);
     if (camStream) camStream.getTracks().forEach(t => t.stop());
+    if (mindarThree.controller) mindarThree.controller.stopProcessVideo();
+    renderer.setAnimationLoop(null);
+    disposeArtScene(art.group);
+    monitor.dispose();
+    renderer.dispose();
+    renderer.domElement.remove();
+    mindarThree.cssRenderer.domElement.remove();
+    if (mindarThree.video) mindarThree.video.remove();
     statusEl.textContent = '启动失败：' + (e && e.message || '未知错误') + '，请刷新重试';
     setTimeout(backToSplash, 4000);
     arBusy = false;
     return;
+  } finally {
+    clearTimeout(initTimer);
+    URL.revokeObjectURL(mindUrl);
   }
   clearInterval(tickInit);
   statusEl.classList.add('hidden');
   hintEl.classList.remove('hidden');
 
   const clock = new THREE.Clock();
-  let driveStarted = false;
-  renderer.setAnimationLoop(() => {
-    const t = clock.getElapsedTime();
-    if (!driveStarted && anchor.visible) {
+  let driveStarted = false, t = 0;
+  const renderAR = () => {
+    const dt = clock.getDelta();
+    if (document.hidden || !anchorRoot.visible) return;
+    t += dt;
+    if (!driveStarted) {
       art.startDriveIn(t + 0.1);
       driveStarted = true;
     }
     art.animate(t);
     renderer.render(scene, camera);
-  });
+    monitor.frame(performance.now(), t);
+  };
+  const onARVisibility = () => {
+    clock.getDelta();
+    monitor.reset();
+    renderer.setAnimationLoop(document.hidden ? null : renderAR);
+  };
+  document.addEventListener('visibilitychange', onARVisibility);
+  onARVisibility();
 }
 
 /* ══════════ VR 模式 ══════════ */
 let vrActive = false;
 let vrState = null;
+let vrRequest = 0;
 let yawT = 0, pitchT = 0, lastInteract = 0, gyroBase = null, gyroOff = 0;
 
-document.getElementById('vrBtn').addEventListener('click', () => { ensureAudio(); enterVR(false); });
-document.getElementById('vrExit').addEventListener('click', () => {
+function exitVR() {
+  vrRequest += 1;
   vrActive = false;
-  vrRoot.style.display = 'none';
-  if (vrState && vrState.renderer.domElement.parentNode) {
-    vrState.renderer.domElement.parentNode.removeChild(vrState.renderer.domElement);
-  }
+  const state = vrState;
   vrState = null;
+  if (state) state.cleanup();
+  vrRoot.style.display = 'none';
+  statusEl.classList.add('hidden');
   vrBusy = false;
   backToSplash();
-});
+}
+
+document.getElementById('vrBtn').addEventListener('click', () => { ensureAudio(); enterVR(false); });
+document.getElementById('vrExit').addEventListener('click', exitVR);
 
 /* 拖动 / 陀螺仪（全局监听一次） */
 {
   let dragging = false, lastX = 0, lastY = 0;
-  vrRoot.addEventListener('pointerdown', (e) => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+  vrRoot.addEventListener('pointerdown', (e) => {
+    if (!vrActive) return;
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    lastInteract = performance.now();
+  });
   vrRoot.addEventListener('pointermove', (e) => {
     if (!dragging || !vrActive) return;
     yawT   = Math.max(-0.5, Math.min(0.5, yawT + (e.clientX - lastX) * 0.004));
@@ -612,12 +805,15 @@ document.getElementById('vrExit').addEventListener('click', () => {
     lastInteract = performance.now();
   });
   window.addEventListener('pointerup', () => { dragging = false; });
+  window.addEventListener('pointercancel', () => { dragging = false; });
   window.addEventListener('deviceorientation', (e) => {
     if (!vrActive || e.alpha == null) return;
     if (gyroBase == null) gyroBase = e.alpha;
     let d = e.alpha - gyroBase;
     d = ((d + 540) % 360) - 180;
-    gyroOff = -d * Math.PI / 180 * 0.8;
+    const next = -d * Math.PI / 180 * 0.8;
+    if (Math.abs(next - gyroOff) > 0.002) lastInteract = performance.now();
+    gyroOff = next;
   });
 }
 
@@ -625,97 +821,117 @@ let vrBusy = false;
 async function enterVR(auto = false) {
   if (vrBusy) return;
   vrBusy = true;
+  const request = ++vrRequest;
   splash.style.display = 'none';
   vrRoot.style.display = 'block';
   statusEl.classList.remove('hidden');
   statusEl.textContent = '正在准备场景…';
-  try {
-    await ensureThree();
-  } catch (e) {
-    vrBusy = false;
-    showErr('加载失败：' + (e && e.message || e));
-    return;
-  }
-  vrActive = true;
-  yawT = 0; pitchT = 0; gyroBase = null; gyroOff = 0;
-  lastInteract = performance.now();
   vrHint.textContent = '拖动画面环视 · 手机上可移动观看';
-
+  /* iOS 必须在点击手势里申请陀螺仪权限，不能等素材下载后再申请。 */
+  let gyroPermission = Promise.resolve(null);
   if (!auto && typeof DeviceOrientationEvent !== 'undefined'
       && typeof DeviceOrientationEvent.requestPermission === 'function') {
-    try {
-      const p = await DeviceOrientationEvent.requestPermission();
-      if (p === 'granted') vrHint.textContent = '转动手机环视 · 也可拖动';
-    } catch {}
+    gyroPermission = DeviceOrientationEvent.requestPermission().catch(() => null);
   }
-
   try {
+    const [, permission] = await Promise.all([ensureThree(), gyroPermission]);
+    if (request !== vrRequest) return;
+    if (permission === 'granted') vrHint.textContent = '转动手机环视 · 也可拖动';
     await loadArtAssets();
-  } catch (e) {
-    vrBusy = false;
-    showErr('插画素材加载失败：' + (e && e.message || e));
-    return;
-  }
+    if (request !== vrRequest) return;
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-  renderer.setSize(innerWidth, innerHeight);
-  renderer.outputEncoding = THREE.sRGBEncoding;
-  vrRoot.insertBefore(renderer.domElement, vrRoot.firstChild);
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x201b33);
-  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 100);
-  let camDist = 2.4;
-
-  const fitCamera = () => {
-    const tanV = Math.tan((camera.fov * Math.PI / 180) / 2);
-    const aspect = innerWidth / innerHeight;
-    const halfW = 0.56, halfH = 0.40;
-    camDist = Math.max(halfW / (tanV * aspect), halfH / tanV) * 1.06;
-  };
-  fitCamera();
-  window.addEventListener('resize', () => {
-    if (!vrActive) return;
-    camera.aspect = innerWidth / innerHeight;
-    camera.updateProjectionMatrix();
+    yawT = 0; pitchT = 0; gyroBase = null; gyroOff = 0;
+    lastInteract = performance.now();
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(getRenderPixelRatio(devicePixelRatio, MOBILE_VIEW));
     renderer.setSize(innerWidth, innerHeight);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    vrRoot.insertBefore(renderer.domElement, vrRoot.firstChild);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x201b33);
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 100);
+    const monitor = createFrameMonitor(renderer, 'VR');
+    const state = { renderer, scene, camera, art: null, monitor, frame: 0, cleanup: null };
+    vrState = state;
+    let camDist = 2.4;
+    const fitCamera = () => {
+      const tanV = Math.tan((camera.fov * Math.PI / 180) / 2);
+      const aspect = innerWidth / innerHeight;
+      const halfW = 0.56, halfH = 0.40;
+      camDist = Math.max(halfW / (tanV * aspect), halfH / tanV) * 1.06;
+    };
+    const onResize = () => {
+      if (vrState !== state) return;
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      fitCamera();
+      monitor.reset();
+    };
+    let t = 0, previous = null, yaw = 0, pitch = 0;
+    const onVisibility = () => {
+      cancelAnimationFrame(state.frame);
+      state.frame = 0; previous = null;
+      monitor.reset();
+      if (!document.hidden && vrState === state) state.frame = requestAnimationFrame(tick);
+    };
+    state.cleanup = () => {
+      cancelAnimationFrame(state.frame);
+      window.removeEventListener('resize', onResize);
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (state.art) disposeArtScene(state.art.group);
+      monitor.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
     fitCamera();
-  });
+    window.addEventListener('resize', onResize);
+    document.addEventListener('visibilitychange', onVisibility);
 
-  const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: -1.35, driveDur: 6.5 });
-  scene.add(art.group);
-  art.startDriveIn(0.9);
+    const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: -1.35, driveDur: 6.5 });
+    state.art = art;
+    scene.add(art.group);
+    art.startDriveIn(0.9);
+    vrActive = true;
+    statusEl.classList.add('hidden');
 
-  vrState = { renderer, scene, camera };
-  statusEl.classList.add('hidden');
+    function tick() {
+      if (vrState !== state || !vrActive || document.hidden) return;
+      const now = performance.now();
+      const elapsed = previous == null ? 1 / 60 : Math.max(0, (now - previous) / 1000);
+      const dt = Math.min(elapsed, 0.1);
+      previous = now;
+      t += elapsed;
+      art.animate(t);
 
-  const clock = new THREE.Clock();
-  let yaw = 0, pitch = 0;
-  (function tick() {
-    if (!vrActive) { renderer.dispose(); return; }
-    const t = clock.getElapsedTime();
-    art.animate(t);
+      /* 相机：小角度环绕（纸偶剧场的视差）+ 缓慢呼吸漂移 */
+      const idle = performance.now() - lastInteract > 3000;
+      const breatheY = idle ? Math.sin(t * 0.22) * 0.035 : 0;
+      const breatheX = idle ? Math.sin(t * 0.17) * 0.012 : 0;
+      const ty = yawT + gyroOff * 0.5 + breatheY;
+      const tp = pitchT + breatheX;
+      const blend = dampingFactor(dt);
+      yaw += (ty - yaw) * blend;
+      pitch += (tp - pitch) * blend;
 
-    /* 相机：小角度环绕（纸偶剧场的视差）+ 缓慢呼吸漂移 */
-    const idle = performance.now() - lastInteract > 3000;
-    const breatheY = idle ? Math.sin(t * 0.22) * 0.035 : 0;
-    const breatheX = idle ? Math.sin(t * 0.17) * 0.012 : 0;
-    const ty = yawT + gyroOff * 0.5 + breatheY;
-    const tp = pitchT + breatheX;
-    yaw += (ty - yaw) * 0.08;
-    pitch += (tp - pitch) * 0.08;
-
-    const cy0 = -0.05;   // 内容垂直中心
-    camera.position.set(
-      Math.sin(yaw) * Math.cos(pitch) * camDist,
-      Math.sin(pitch) * camDist + cy0,
-      Math.cos(yaw) * Math.cos(pitch) * camDist
-    );
-    camera.lookAt(0, cy0, 0);
-    renderer.render(scene, camera);
-    requestAnimationFrame(tick);
-  })();
+      const cy0 = -0.05;
+      camera.position.set(
+        Math.sin(yaw) * Math.cos(pitch) * camDist,
+        Math.sin(pitch) * camDist + cy0,
+        Math.cos(yaw) * Math.cos(pitch) * camDist
+      );
+      camera.lookAt(0, cy0, 0);
+      renderer.render(scene, camera);
+      monitor.frame(now, t);
+      state.frame = requestAnimationFrame(tick);
+    }
+    onVisibility();
+  } catch (e) {
+    if (request !== vrRequest) return;
+    exitVR();
+    showErr('场景加载失败：' + (e && e.message || e));
+  }
 }
 
 /* 空闲预热：页面打开后先把识别引擎（three + MindAR）编译好，

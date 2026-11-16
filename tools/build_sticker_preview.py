@@ -8,7 +8,12 @@ coordinate system; the new composition is not exact registration to the old prin
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
+
+ART_VERSION_RE = re.compile(
+    r"(?m)^\s*const\s+ART_VERSION\s*=\s*(['\"])([0-9]+)\1\s*;"
+)
 
 from PIL import Image, ImageDraw
 
@@ -21,6 +26,13 @@ BUS = (53.0, 238.0, 1.16)
 
 def read_json(path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def runtime_version(index_text):
+    matches = ART_VERSION_RE.findall(index_text)
+    if len(matches) != 1:
+        raise ValueError("Expected one numeric ART_VERSION in index.html")
+    return matches[0][1]
 
 
 def mapped_rect(rect, transform, shift=(0, 0)):
@@ -59,22 +71,30 @@ def replace_once(text, old, new):
     return text.replace(old, new, 1)
 
 
-def make_preview_page(project, output):
+def make_preview_page(project, output, art_version):
     import os
     original = (project / "index.html").read_text(encoding="utf-8")
+    if runtime_version(original) != art_version:
+        raise ValueError("Runtime version changed while building the preview")
     text = original.replace("./lib/", Path(os.path.relpath(project / "lib", output)).as_posix() + "/")
     target = Path(os.path.relpath(project / "assets" / "target.mind", output)).as_posix()
     text = replace_once(text, "'./assets/target.mind'", json.dumps(target))
     # Reuse the current production runtime, including wheel and startup fixes.
-    text = replace_once(text, ">v28</p>", ">v28 PNG · 本地候选 · 未验证手机 AR 对位</p>")
+    version_badge = re.compile(r"(<p\b[^>]*>)v" + re.escape(art_version) + r"(</p>)")
+    text, badge_count = version_badge.subn(
+        lambda match: match.group(1) + "v" + art_version + " PNG · 本地候选 · 未验证手机 AR 对位" + match.group(2),
+        text,
+    )
+    if badge_count != 1:
+        raise ValueError("Expected one matching runtime version badge in index.html")
     # Debug surface is present only in the isolated preview; it does not alter production.
     text = replace_once(text, "return { group, animate, startDriveIn };",
         "return { group, animate, startDriveIn, birds, bench, busGroup, wheels, signGroup };")
-    text = replace_once(text, "vrState = { renderer, scene, camera };",
-        "vrState = { renderer, scene, camera };\n  window.__stickerPreview = { art, renderer, scene, camera, pause: false, time: 0, onlyBench: false, lift: 0 };")
+    text = replace_once(text, "    state.art = art;",
+        "    state.art = art;\n    window.__stickerPreview = { art, renderer, scene, camera, pause: false, time: 0, onlyBench: false, lift: 0 };")
     text = replace_once(text,
-        "    const t = clock.getElapsedTime();\n    art.animate(t);\n\n    /* 相机：",
-        "    const liveT = clock.getElapsedTime();\n    const debug = window.__stickerPreview;\n    const t = debug.pause ? debug.time : liveT;\n    art.animate(t);\n    art.birds.forEach(bird => { bird.visible = !debug.onlyBench; bird.position.y += debug.lift * UNIT; });\n    art.busGroup.visible = !debug.onlyBench;\n    art.signGroup.visible = !debug.onlyBench;\n\n    /* 相机：")
+        "      t += elapsed;\n      art.animate(t);\n\n      /* 相机：",
+        "      t += elapsed;\n      const liveT = t;\n      const debug = window.__stickerPreview;\n      const artT = debug.pause ? debug.time : liveT;\n      art.animate(artT);\n      art.birds.forEach(bird => { bird.visible = !debug.onlyBench; bird.position.y += debug.lift * UNIT; });\n      art.busGroup.visible = !debug.onlyBench;\n      art.signGroup.visible = !debug.onlyBench;\n\n      /* 相机：")
     text = replace_once(text, "</body>", '''<div id="previewChecks" style="position:fixed;bottom:65px;left:12px;z-index:60;display:flex;gap:8px;flex-wrap:wrap"><button data-check="normal">正常动画</button><button data-check="bench">只看长椅</button><button data-check="lift">鸟抬起 55px</button><span style="color:#ddd;font-size:11px">本地 PNG 候选 · 非手机 AR 验收</span></div>
 <script>
 window.__previewMetrics = { errors: [] };
@@ -137,14 +157,18 @@ def main():
     rects = {name: mapped_rect(rect, BUS if name == "bus" or name.startswith("wheel") else STAGE,
                               wheel_shift if name.startswith("wheel") else (0, 0))
              for name, (_, rect) in source_parts.items()}
+    index_text = (args.project / "index.html").read_text(encoding="utf-8")
+    art_version = runtime_version(index_text)
     old_meta = read_json(args.project / "assets" / "sprites" / "meta.json")
+    if str(old_meta.get("version")) != art_version:
+        raise ValueError("Production metadata version does not match ART_VERSION")
     wheels = []
     for name in ("wheel0", "wheel1"):
         hx, hy = static[name]["hub"]
         wheels.append([round(BUS[0] + BUS[2] * (hx + wheel_shift[0]), 4),
                        round(BUS[1] + BUS[2] * (hy + wheel_shift[1]), 4),
                        round(BUS[2] * static[name]["half_size"], 4)])
-    meta = {"version": "28", "wheelFaces": [
+    meta = {"version": art_version, "wheelFaces": [
                 {"radius": 51 * BUS[2], "rollingRadius": 54 * BUS[2]},
                 {"radius": 51 * BUS[2], "rollingRadius": 54 * BUS[2]}],
             "rects": rects, "wheels": wheels, "size": [1745, 1280],
@@ -182,7 +206,7 @@ def main():
     for lift in (0, 55):
         composite(images, meta, (177, 207, 226, 255), lift=lift).convert("RGB").save(checks / ("birds_lift_" + str(lift) + ".png"))
     composite(images, meta, (177, 207, 226, 255), bench_only=True).convert("RGB").save(checks / "bench_only.png")
-    make_preview_page(args.project, args.out)
+    make_preview_page(args.project, args.out, art_version)
     print(json.dumps({"preview": str(args.out / "index.html"), "sprites": len(images),
                       "webp_bytes": sum(v["webp_bytes"] for v in manifest["parts"].values()),
                       "wheels": wheels, "signPivot": meta["signPivot"]}, indent=2))
