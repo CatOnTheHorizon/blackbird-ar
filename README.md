@@ -1,68 +1,51 @@
 # 黑鸟面包巴士 · 月历 AR/VR 彩蛋
 
-2026 伊坂幸太郎月历的隐藏彩蛋。手机打开网页后，可以对着月历插画扫描出 AR 动画，也可以直接进入 VR 环视场景。
+2026 伊坂幸太郎月历的隐藏彩蛋：手机对准月历插画进入 AR，或不使用相机直接进入 VR 纸偶场景。
 
-**线上地址**：https://catonthehorizon.github.io/blackbird-ar/
+**GitHub Pages**：https://catonthehorizon.github.io/blackbird-ar/
+
+## v28
+
+- 采用用户提供的透明 PNG 重建十张贴片，鸟尾、脚与长椅分离；保留已确认的车轮嵌入深度。
+- 轮胎侧面/外轮廓固定，仅正面围绕轮毂旋转；转角跟随巴士驶入距离，停车后停止空转。
+- 页面及贴片 metadata 使用版本 28；所有 metadata/WebP 请求带 `?v=28`，避免新页面混用浏览器缓存中的旧贴片。
+- 生产页面不包含本地的“只看长椅 / 鸟抬起”检查控件。
+- 原 `target.jpg`、`target-1024.jpg`、`target.mind` 保持不变；旧版可从 Git 历史回滚，本地另保留 `preview-v27/v26-backup/`。
+
+本地文件修改、Git 提交、推送成功、Pages 实际更新是不同阶段。发布必须等线上页面版本、metadata 和十张 WebP 与本地逐项一致后才算完成，不能用 README 或提交状态代替验证。
 
 ## 两种模式
 
 | 模式 | 入口 | 说明 |
 |---|---|---|
-| AR | 「开始 AR · 对准月历插画」 | 授权摄像头 → 对准月历上的 BYE BYE BLACKBIRD 插画 → MindAR 识别后播放驶入动画 |
-| VR | 「进入 VR · 插画动起来」或扫码 `?mode=vr` | 不需要摄像头，直接环视立体纸偶场景 |
+| AR | 「开始 AR · 对准月历插画」 | 请求摄像头权限，对准原月历插画，识别后播放动画 |
+| VR | 「进入 VR · 插画动起来」或 `?mode=vr&v=28` | 无需摄像头，直接观看并拖动环视 |
 
-二维码文件：`assets/qr.png`（通用入口）、`assets/qr-vr.png`（直达 VR）。
+二维码：`assets/qr.png` 为通用入口，`assets/qr-vr.png` 为 VR 入口。
 
-## 文件结构
+## 构建和测试
 
-```
-index.html                  单页应用（AR/VR 共用同一套贴片场景）
-assets/target.jpg           原始插画（识别目标 + 抠图源图）
-assets/target-1024.jpg      编译识别目标前缩到 1024px 的版本
-assets/target.mind          MindAR 图像识别数据
-assets/sprites/*.webp       抠好的透明贴片（网页实际加载的版本）
-assets/sprites/meta.json    贴片矩形、车轮坐标、天空色标
-lib/                        three.js + MindAR（本地化，不依赖 CDN）
-tools/extract.py            从 target.jpg 抠图并生成贴片/长椅/站牌/车轮
-tools/build_birds_from_ora.py  用 ORA 乌鸦图层重建五只鸟贴片（v26 起）
-tools/to_webp.py            PNG → WebP（保留 alpha）
-tools/ora_src/              ORA 解包目录（git 忽略，仅本地构建用）
+构建入口、环境与隔离输入要求见 [PNG 构建说明](tools/STICKER_PREVIEW.md)。
+
+- `tools/extract_sticker_png.py`：从隔离源 PNG 生成候选，不覆盖生产资产。
+- `tools/build_sticker_preview.py`：按当前 runtime 生成带检查控件的候选。
+- `tools/package_sticker_release.py`：生成无调试控件的发布暂存目录。
+- `tools/test_wheel_scene.mjs`：无需浏览器，验证轮轴固定、正面 UV 居中、行驶距离和停车状态。
+
+```text
+node tools/test_wheel_scene.mjs
 ```
 
-## 重新生成贴片
+`tools/extract.py`、`tools/build_birds_from_ora.py` 和 `tools/to_webp.py` 为旧版管线；不要使用它们覆盖新版贴片。源图、候选、放大图和备份都被 .gitignore 排除。
 
-**鸟贴片（v26 起，推荐）**：把猫老师给的 ORA 解包到 `tools/ora_src/`（包含 `stack.xml` 和 `data/`），然后：
+## 已验证与限制
 
-```bash
-python -I tools/build_birds_from_ora.py
-cp tools/ora_src/new_sprites/bird*.png assets/sprites/
-python tools/to_webp.py
-```
-
-**巴士/长椅/站牌/车轮**仍由 `tools/extract.py` 从 `target.jpg` 生成：
-
-```bash
-python tools/extract.py
-python tools/to_webp.py
-```
-
-然后刷新页面。贴片坐标写在 `assets/sprites/meta.json`，`index.html` 会按它摆位。
-
-## ORA 图层说明（v26）
-
-ORA 里共 11 个命名图层。五只乌鸦的图层（`04_crow_leaf`、`05_crow_strap`、`06_crow_115`、`07_crow_bag`、`09_crow_banner`）手切轮廓最干净，鸟贴片以它们为基础；但要注意：
-
-- **ORA 里的横幅、枫叶、115 号牌其实没有被切进图层**（透明），只在 ORA 预览叠着原图时才显示。构建脚本会从原图/旧贴片把这三样补回（115 牌子是这次新补完整的）。
-- **ORA 的巴士图层有破洞/天空残边，站牌图层右端仍被画布切断，长椅图层顶部带着鸟脚残影**。这三样继续用 `extract.py` 修好的版本，否则会退步。
-- ORA 的 `08_chick` 与 `07_crow_bag` 中重复包含了小鸟；当前把小鸟继续合在 bird4 一起动，没有单独拆。
-
-## 已知注意点
-
-- `assets/target.mind` 是按 1024px 的目标图编译的；**印刷定稿后如果图案有改动，需要重新编译**（MindAR 编译器对图案特征敏感）。
-- 鸟贴片底部仍用旧版干净的脚/尾部分混合，去掉 ORA 图层带进来的长椅横线；不要改回“整行清除长椅线”的写法。
-- 网页在打开 1.2 秒后会空闲预热 three + MindAR，并在 `modulepreload` 里预取引擎文件；这样点「开始 AR」时不用再等 3.8MB 下载。改动加载逻辑时保留这个预热，否则按钮响应会明显变慢。
-- 目前已知的小瑕疵：bird6 横幅上方会带出一小片奶油色天空纹理（原画天空和卷轴颜色太接近，难以完全分离），实际尺寸下不明显。
+- 已完成透明边缘、静止长椅与仅鸟上移的本地合成检查。
+- 已检查本地 VR 及 AR 按钮反馈；这不等于手机相机识别、印刷对位或真机启动耗时测试。
+- 新 PNG 构图和巴士文字与原月历不同。透明贴片不会擦掉纸面原图，AR 仍可能出现原图透出、重影或比例错位。
+- PNG 是扁平拼版，鸟脚/尾与椅边交叠处有局部轮廓和重复木纹重建，不是恢复被遮挡的原始像素。
+- 保留模块预载与空闲预热；metadata 版本不匹配时提示刷新，而不是继续混用资产。
 
 ## 部署
 
-GitHub Pages，`main` 分支根目录。版本号显示在启动页底部（当前 `v26`）；手机测试时如果看到的不是最新版本，强制刷新或加 `?v=26`。
+GitHub Pages 从 `main` 分支根目录发布。通过系统代理使用 HTTPS Git 推送，待线上实际更新后检查：启动页显示 **v28**、metadata `version` 为 `28`，十张 WebP SHA-256 与生产目录一致。手机测试用 `?v=28`，VR 用 `?mode=vr&v=28`。
