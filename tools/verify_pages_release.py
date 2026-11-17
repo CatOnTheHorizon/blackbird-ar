@@ -22,6 +22,8 @@ ART_VERSION_RE = re.compile(
 NAMES = ["bus", "wheel0", "wheel1", "bird1", "bird2", "bird3", "bird4", "bird6", "sign", "bench"]
 TARGETS = ["target.jpg", "target-1024.jpg", "target.mind"]
 MUSIC_PATH = "assets/audio/bye-bye-blackbird.mp3"
+RUNTIME_MODULE_PATH = "lib/bus-motion.mjs"
+RUNTIME_MODULE_TYPES = {"application/javascript", "text/javascript"}
 
 
 def sha(data):
@@ -69,7 +71,7 @@ def main():
             raise SystemExit("--version must match the committed metadata version")
     version = metadata_version
 
-    paths = ["index.html", "assets/sprites/meta.json"]
+    paths = ["index.html", "assets/sprites/meta.json", RUNTIME_MODULE_PATH]
     paths.extend("assets/sprites/" + name + ".webp" for name in NAMES)
     paths.extend("assets/" + name for name in TARGETS)
     paths.append(MUSIC_PATH)
@@ -100,8 +102,12 @@ def main():
                     body = response.read()
                     actual = sha(body)
                     content_type = response.headers.get("Content-Type", "")
-                    content_type_match = (name != MUSIC_PATH or
-                                          content_type.split(";", 1)[0].strip().lower() in {"audio/mpeg", "audio/mp3"})
+                    media_type = content_type.split(";", 1)[0].strip().lower()
+                    content_type_match = True
+                    if name == MUSIC_PATH:
+                        content_type_match = media_type in {"audio/mpeg", "audio/mp3"}
+                    elif name == RUNTIME_MODULE_PATH:
+                        content_type_match = media_type in RUNTIME_MODULE_TYPES
                     hash_match = actual == expected[name]
                     return {"path": name, "url": url, "http": response.status,
                             "bytes": len(body), "sha256": actual,

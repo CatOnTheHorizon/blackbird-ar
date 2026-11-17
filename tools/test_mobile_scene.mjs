@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBusLoop } from '../lib/bus-motion.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8').split('\r\n').join('\n');
@@ -35,6 +36,14 @@ function compile(scope, names, tail) {
 function near(actual, expected, tolerance = 1e-12, label = 'value') {
   assert.ok(Number.isFinite(actual) && Math.abs(actual - expected) <= tolerance,
     `${label}: ${actual} should equal ${expected} (tolerance ${tolerance})`);
+}
+function nearVector(actual, expected, tolerance = 1e-9, label = 'vector') {
+  actual.toArray().forEach((value, index) => near(value, expected[index], tolerance, `${label}[${index}]`));
+}
+function rigidMatrix(x, y, z, rx = 0, ry = 0, rz = 0, scale = 1) {
+  const position = new THREE.Vector3(x, y, z);
+  const rotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz));
+  return new THREE.Matrix4().compose(position, rotation, new THREE.Vector3(scale, scale, scale));
 }
 function deferred() {
   let resolve, reject;
@@ -89,7 +98,7 @@ class FakeTarget {
 }
 function canvasContext() {
   // A call recorder, deliberately NOT a canvas rasterizer or a fake pixel oracle.
-  const context = { globalAlpha: 1, fillStyle: null, gradients: [], fills: [], path: [] };
+  const context = { globalAlpha: 1, fillStyle: null, gradients: [], fills: [], path: [], draws: [] };
   for (const kind of ['Linear', 'Radial']) {
     context['create' + kind + 'Gradient'] = (...args) => {
       const gradient = { kind, args, stops: [], addColorStop(offset, color) {
@@ -108,6 +117,7 @@ function canvasContext() {
   }
   context.fill = () => context.fills.push({ path: [...context.path], style: context.fillStyle,
     alpha: context.globalAlpha });
+  context.drawImage = (...args) => context.draws.push(args);
   return context;
 }
 class FakeElement extends FakeTarget {
@@ -124,6 +134,7 @@ class FakeElement extends FakeTarget {
     this.autoplay = this.muted = this.defaultMuted = this.playsInline = false;
     this.paused = true;
     this.readyState = this.videoWidth = this.videoHeight = 0;
+    this.currentTime = 0;
     this.srcObject = null;
     const classes = new Set();
     this.classList = { add: name => classes.add(name), remove: name => classes.delete(name),
@@ -260,7 +271,11 @@ class FakeRenderer {
     camera.updateMatrixWorld(true);
     this.renderCount += 1;
     this.info.render.calls = 0;
-    scene.traverse(object => { if (object.isMesh && object.visible) this.info.render.calls += 1; });
+    scene.traverse(object => {
+      if (!object.isMesh || !object.visible) return;
+      object.onBeforeRender?.(this, scene, camera, object.geometry, object.material, null);
+      this.info.render.calls += 1;
+    });
   }
   clear() { this.clearCount += 1; }
   setClearColor(color, alpha) { this.clearColors.push([color, alpha]); }
@@ -271,7 +286,7 @@ class FakeRenderer {
 const artNames = ['spriteMesh', 'sparkleTexture', 'skyPlane', 'createArtScene', 'disposeArtScene'];
 function makeArt() {
   const dom = makeDOM();
-  return { ...dom, ...compile({ THREE, document: dom.document, Math: seededMath(),
+  return { ...dom, ...compile({ THREE, createBusLoop, document: dom.document, Math: seededMath(),
     UNIT: 1 / 1745, pxX: px => px / 1745 - 0.5,
     pxY: py => (0.5 - py / 1280) * (1280 / 1745) }, artNames,
   'return { skyPlane, createArtScene, disposeArtScene };') };
@@ -325,14 +340,18 @@ function makeMonitor(mobile = true, ratio = 1.5) {
 }
 
 // Real enterVR/exitVR/startAR; mock platform boundaries and asset-loading promises only.
-function makeRuntime() {
+function makeRuntime(search = '') {
   const dom = makeDOM(), raf = makeRAF(), timers = makeTimers();
-  const tex = textures(), renderers = [], mindars = [], mediaCalls = [], fetches = [];
+  const tex = textures(), renderers = [], mindars = [], mediaCalls = [], fetches = [], clocks = [];
   const urls = { created: [], revoked: [] }, musicCalls = [], musicInit = [];
   const loading = { three: async () => {}, assets: async () => {}, threeCalls: 0, assetCalls: 0 };
   const control = { arError: null, onARStart: () => {} };
   const track = { stops: 0, stop() { this.stops += 1; }, getSettings: () => ({ width: 1280, height: 720, frameRate: 30 }) };
   const stream = { getTracks: () => [track], getVideoTracks: () => [track] };
+  class TestClock {
+    constructor() { this.delta = 1 / 60; this.calls = 0; clocks.push(this); }
+    getDelta() { this.calls += 1; return this.delta; }
+  }
   class TestRenderer extends FakeRenderer {
     constructor(options) { super(dom.document); this.options = options; renderers.push(this); }
   }
@@ -347,15 +366,32 @@ function makeRuntime() {
       this.container.appendChild(this.cssRenderer.domElement);
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(55, 390 / 844, 0.1, 100);
+      this.resizeCalls = 0;
+      dom.window.addEventListener('resize', this.resize.bind(this));
       this.anchor = { group: new THREE.Group() };
       this.anchor.group.visible = false;
+      this.anchor.group.matrixAutoUpdate = false;
       this.scene.add(this.anchor.group);
       this.anchorIndices = [];
-      this.controller = { stops: 0, stopProcessVideo() { this.stops += 1; } };
+      this.controller = {
+        stops: 0, input: null, inputWidth: 0, inputHeight: 0, dummyInput: null, processInputs: [],
+        trackingStates: [{ isTracking: true }],
+        async dummyRun(input) { this.dummyInput = input; },
+        processVideo(input) { this.input = input; this.processInputs.push(input); },
+        stopProcessVideo() { this.stops += 1; }
+      };
       mindars.push(this);
     }
+    resize() { this.resizeCalls += 1; }
     addAnchor(index) { this.anchorIndices.push(index); return this.anchor; }
-    async _startAR() {}
+    async _startAR() {
+      const input = this.video;
+      this.controller.inputWidth = input.videoWidth;
+      this.controller.inputHeight = input.videoHeight;
+      await this.controller.dummyRun(input);
+      this.controller.processVideo(input);
+      this.resize();
+    }
     async start() {
       await this._startVideo();
       await this._startAR();
@@ -363,8 +399,9 @@ function makeRuntime() {
       if (control.arError) throw control.arError;
     }
   }
-  const scope = { THREE: { ...THREE, WebGLRenderer: TestRenderer }, MindARThree: TestMindAR,
-    document: dom.document, window: dom.window, Math: seededMath(),
+  const scope = { THREE: { ...THREE, WebGLRenderer: TestRenderer, Clock: TestClock },
+    createBusLoop, MindARThree: TestMindAR, document: dom.document, window: dom.window,
+    location: { search }, URLSearchParams, Math: seededMath(),
     createBackgroundMusic: (audio, button, note) => {
       musicInit.push({ audio, button, note });
       return { enter: fromGesture => musicCalls.push(['enter', fromGesture]),
@@ -394,7 +431,8 @@ function makeRuntime() {
       } }) } };
     } };
   const names = [...artNames, 'getRenderPixelRatio', 'dampingFactor', 'requestCameraStream',
-    'createCameraPreview', 'createFrameMonitor', 'startAR', 'enterVR', 'exitVR'];
+    'createCameraPreview', 'createTrackingInput', 'createPoseFollower', 'createFrameMonitor',
+    'startAR', 'enterVR', 'exitVR'];
   const runtime = compile(scope, names, `
     ${between('const statusEl =', '/* ── 手机画质')}
     let arBusy = false, vrActive = false, vrState = null, vrRequest = 0, vrBusy = false;
@@ -407,7 +445,7 @@ function makeRuntime() {
       viewport: (width, height) => { innerWidth = width; innerHeight = height; }
     };
   `);
-  return { ...dom, raf, timers, tex, renderers, mindars, mediaCalls, fetches, urls,
+  return { ...dom, raf, timers, tex, renderers, mindars, mediaCalls, fetches, urls, clocks,
     musicCalls, musicInit, loading, control, track, stream, runtime };
 }
 
@@ -499,13 +537,14 @@ await test('skyPlane AR dimensions, opaque inputs, alpha/depth, and paper-plane 
     transparent: sky.material.transparent, worldZ: world.z, opaqueStops: meta.skyStops.length };
 });
 
-await test('createArtScene backdrop ordering and unchanged VR far sky', () => {
+await test('createArtScene backdrop ordering, AR depth/clipping, and unchanged VR depths', () => {
   const api = makeArt(), tex = textures();
   const ar = api.createArtScene(meta, tex, { withBackdrop: true });
   const backdrop = ar.group.getObjectByName('ar-backdrop');
   const stars = ar.group.getObjectByName('sparkles');
   assert.ok(backdrop && stars);
   assert.equal(ar.group.getObjectByName('vr-sky'), undefined);
+  assert.deepEqual(ar.group.scale.toArray(), [1, 1, 1], 'only backdrop geometry grows');
   assert.equal(stars.renderOrder, -10);
   const foreground = [];
   ar.group.traverse(object => {
@@ -514,6 +553,41 @@ await test('createArtScene backdrop ordering and unchanged VR far sky', () => {
   assert.equal(foreground.length, 12);
   foreground.forEach(object => assert.ok(object.renderOrder > stars.renderOrder));
   assert.ok(backdrop.renderOrder < stars.renderOrder);
+
+  const busGroup = meshWithMap(ar.group, 'bus').parent;
+  const busMesh = meshWithMap(ar.group, 'bus');
+  const wheelFaces = busGroup.children.slice(1).map(wheel => wheel.children[1]);
+  const signGroup = meshWithMap(ar.group, 'sign').parent;
+  const bench = meshWithMap(ar.group, 'bench');
+  near(busGroup.position.z, 0.005, 1e-12, 'AR bus local z');
+  near(signGroup.position.z, 0.015, 1e-12, 'AR sign local z');
+  near(bench.position.z, 0.035, 1e-12, 'AR bench local z');
+  const birdDepths = ['bird1', 'bird2', 'bird3', 'bird4', 'bird6']
+    .map(name => meshWithMap(ar.group, name).position.z);
+  birdDepths.forEach((depth, index) => near(depth, 0.065 + index * 0.001, 1e-12, 'AR bird local z'));
+  const starMatrix = new THREE.Matrix4();
+  for (let i = 0; i < stars.count; i++) {
+    stars.getMatrixAt(i, starMatrix);
+    assert.ok(starMatrix.elements[14] >= 0.002 && starMatrix.elements[14] <= 0.005,
+      'AR stars stay close to the paper plane');
+  }
+  const clipPlanes = busMesh.material.clippingPlanes;
+  assert.equal(clipPlanes.length, 2);
+  nearVector(clipPlanes[0].normal, [1, 0, 0]); near(clipPlanes[0].constant, 0.56);
+  nearVector(clipPlanes[1].normal, [-1, 0, 0]); near(clipPlanes[1].constant, 0.56);
+  ar.group.position.set(0.2, -0.1, 0.3);
+  ar.group.rotation.z = 0.25;
+  ar.group.scale.set(1.2, 0.8, 1.4);
+  ar.group.updateMatrixWorld(true);
+  const expectedWorldPlanes = clipPlanes.map((_, index) => new THREE.Plane(
+    new THREE.Vector3(index === 0 ? 1 : -1, 0, 0), 0.56
+  ).applyMatrix4(ar.group.matrixWorld));
+  busMesh.onBeforeRender();
+  clipPlanes.forEach((plane, index) => {
+    nearVector(plane.normal, expectedWorldPlanes[index].normal.toArray(), 1e-12, 'world clip normal');
+    near(plane.constant, expectedWorldPlanes[index].constant, 1e-12, 'world clip constant');
+  });
+
   const vr = api.createArtScene(meta, tex, { withSky: true });
   const sky = vr.group.getObjectByName('vr-sky');
   assert.ok(sky);
@@ -521,21 +595,57 @@ await test('createArtScene backdrop ordering and unchanged VR far sky', () => {
   assert.deepEqual([sky.geometry.parameters.width, sky.geometry.parameters.height], [8, 6.5]);
   assert.deepEqual(sky.position.toArray(), [0, 0.3, -3.6]);
   assert.equal(sky.renderOrder, -100);
+  near(meshWithMap(vr.group, 'bus').parent.position.z, -0.04, 1e-12, 'VR bus z unchanged');
+  near(meshWithMap(vr.group, 'sign').parent.position.z, 0.012, 1e-12, 'VR sign z unchanged');
+  near(meshWithMap(vr.group, 'bench').position.z, 0.02, 1e-12, 'VR bench z unchanged');
   const bare = api.createArtScene(meta, tex);
   assert.equal(bare.group.getObjectByName('ar-backdrop'), undefined);
   assert.equal(bare.group.getObjectByName('vr-sky'), undefined);
-  assert.deepEqual(ar.group.scale.toArray(), [1, 1, 1], 'only backdrop geometry grows');
+  assert.deepEqual(ar.group.scale.toArray(), [1.2, 0.8, 1.4], 'only backdrop geometry grows');
   for (const name of Object.keys(meta.rects).filter(name => !name.startsWith('wheel'))) {
     const foregroundMesh = meshWithMap(ar.group, name), original = meshWithMap(bare.group, name);
     assert.deepEqual(foregroundMesh.geometry.parameters, original.geometry.parameters, name + ' geometry unchanged');
-    assert.deepEqual(foregroundMesh.position.toArray(), original.position.toArray(), name + ' position unchanged');
+    const expectedPosition = original.position.clone();
+    if (name.startsWith('bird')) expectedPosition.z += 0.02;
+    if (name === 'bench') expectedPosition.z += 0.015;
+    nearVector(foregroundMesh.position, expectedPosition.toArray(), 1e-12,
+      name + (name.startsWith('bird') || name === 'bench' ? ' keeps xy and gets the AR depth offset' : ' position unchanged'));
     assert.deepEqual(foregroundMesh.scale.toArray(), [1, 1, 1], name + ' is not enlarged');
   }
   const both = api.createArtScene(meta, tex, { withSky: true, withBackdrop: true });
   assert.ok(both.group.getObjectByName('ar-backdrop'));
   assert.equal(both.group.getObjectByName('vr-sky'), undefined, 'backdrop takes precedence');
   return { order: [backdrop.renderOrder, stars.renderOrder, Math.min(...foreground.map(m => m.renderOrder))],
-    foregroundMeshes: foreground.length, vrSky: { size: [8, 6.5], position: sky.position.toArray() } };
+    foregroundMeshes: foreground.length, arDepths: { bus: 0.005, sign: 0.015, bench: 0.035, birds: birdDepths },
+    clipPlanes: clipPlanes.map(plane => ({ normal: plane.normal.toArray(), constant: plane.constant })),
+    vrSky: { size: [8, 6.5], position: sky.position.toArray(), busZ: -0.04 } };
+});
+
+await test('createArtScene runs the complete eight-second bus loop and continuous wheel travel', () => {
+  const art = makeArt().createArtScene(meta, textures());
+  const busGroup = meshWithMap(art.group, 'bus').parent;
+  const wheelFaces = busGroup.children.slice(1).map(wheel => wheel.children[1]);
+  const loop = createBusLoop(meta);
+  assert.equal(loop.duration, 8, 'default bus loop is eight seconds');
+  assert.equal(busGroup.position.z, -0.04, 'default/VR bus depth is unchanged');
+  const start = 1.25;
+  art.startDriveIn(start);
+  const samples = [];
+  for (const elapsed of [0, 0.5, 7.99, 8, 8.25, 16]) {
+    const time = start + elapsed, expected = loop.sample(elapsed);
+    art.animate(time);
+    near(busGroup.position.x, expected.x, 1e-12, `bus position at ${elapsed}s`);
+    near(busGroup.position.y, Math.sin(time * 8) * 0.002, 1e-12, `bus bob at ${elapsed}s`);
+    wheelFaces.forEach((wheel, index) => near(wheel.rotation.z, expected.angle, 1e-12,
+      `wheel ${index} angle at ${elapsed}s`));
+    samples.push({ elapsed, x: busGroup.position.x, wheelAngle: wheelFaces[0].rotation.z });
+  }
+  near(samples[0].x, samples[3].x, 1e-12, 'position wraps after one full loop');
+  assert.ok(samples[3].wheelAngle < samples[0].wheelAngle, 'wheel angle accumulates across the position wrap');
+  assert.notEqual(samples[4].x, samples[0].x, 'bus does not remain parked at the loop start');
+  assert.ok(samples[5].wheelAngle < samples[3].wheelAngle, 'wheels continue through a second loop');
+  return { duration: loop.duration, startTime: start, samples, wheelFaces: wheelFaces.length,
+    motion: 'position wraps; wheel angle follows unwrapped distance' };
 });
 
 await test('24 sparkles share one InstancedMesh and update real matrix/color buffers', () => {
@@ -777,7 +887,7 @@ await test('disposeArtScene releases unique owned resources, not shared ART_TEX'
     unownedCanvasPreserved: true, duplicateReferencesDisposedOnce: true };
 });
 
-await test('startAR executes withBackdrop on anchor 0 and reuses the preflight stream', async () => {
+await test('startAR uses native near-pass filtering, a sibling visual root, and one shared camera preview', async () => {
   const h = makeRuntime();
   await h.runtime.startAR();
   assert.equal(h.musicInit.length, 1);
@@ -788,22 +898,47 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   const mindar = h.mindars[0];
   assert.deepEqual(mindar.anchorIndices, [0]);
   assert.equal(mindar.options.maxTrack, 1);
-  assert.equal(mindar.options.filterMinCF, 0.0035);
-  assert.equal(mindar.options.filterBeta, 0.025);
+  assert.equal(mindar.options.filterMinCF, 1);
+  assert.equal(mindar.options.filterBeta, 0);
   assert.equal(mindar.options.missTolerance, undefined, 'native loss tolerance is retained');
-  assert.equal(mindar.anchor.group.children.length, 1);
-  const group = mindar.anchor.group.children[0];
+  assert.equal(mindar.renderer.localClippingEnabled, true);
+  const anchorRoot = mindar.anchor.group;
+  const visualRoot = mindar.scene.getObjectByName('ar-visual-root');
+  assert.ok(visualRoot);
+  assert.equal(anchorRoot.parent, mindar.scene);
+  assert.equal(visualRoot.parent, mindar.scene);
+  assert.equal(anchorRoot.parent, visualRoot.parent, 'the pose root is a sibling of the raw MindAR anchor');
+  assert.equal(anchorRoot.children.length, 0, 'art is not nested under the raw tracking matrix');
+  assert.equal(visualRoot.children.length, 1);
+  const group = visualRoot.children[0];
   const backdrop = group.getObjectByName('ar-backdrop');
   assert.ok(backdrop);
   assert.equal(group.getObjectByName('vr-sky'), undefined);
   assert.equal(group.position.z, 0.01);
   group.updateWorldMatrix(true, true);
   near(backdrop.getWorldPosition(new THREE.Vector3()).z, 0);
+
+  const previewVideo = h.document.created.find(node => node.tagName === 'VIDEO');
+  assert.ok(previewVideo, 'the real DOM camera preview exists');
+  assert.equal(h.document.created.filter(node => node.tagName === 'VIDEO').length, 1,
+    'MindAR does not create a second DOM camera element');
+  assert.equal(previewVideo.srcObject, h.stream);
+  assert.equal(previewVideo.parentNode, h.elements.container);
+  assert.equal(previewVideo.paused, false);
+  assert.deepEqual([previewVideo.videoWidth, previewVideo.videoHeight], [1280, 720]);
+  assert.equal(mindar.video.tagName, 'CANVAS', 'MindAR receives the offscreen tracking proxy by default');
+  assert.notEqual(mindar.video, previewVideo, 'camera UI assertions use preview.video, not the proxy');
+  assert.equal(mindar.controller.input, mindar.video);
+  assert.equal(mindar.controller.dummyInput, mindar.video);
+  assert.deepEqual(mindar.controller.processInputs, [mindar.video]);
+  assert.deepEqual([mindar.controller.inputWidth, mindar.controller.inputHeight], [800, 450]);
+  assert.equal(mindar.video.videoWidth, mindar.video.width);
+  assert.equal(mindar.video.videoHeight, mindar.video.height);
+  assert.equal(mindar.video.context.draws.length, 1, 'initial tracking proxy copy uses drawImage');
   assert.equal(h.mediaCalls.length, 1);
   assert.deepEqual(h.mediaCalls[0], idealCameraConstraints);
-  assert.equal(mindar.video.srcObject, h.stream);
   assert.equal(h.track.stops, 0);
-  assert.equal(mindar.video.parentNode, h.elements.container);
+  assert.equal(h.raf.pending.size, 0, 'tracking adds no second rAF loop');
   assert.deepEqual(h.fetches, ['./assets/target.mind']);
   assert.equal(h.urls.created.length, 1);
   assert.deepEqual(h.urls.revoked, ['blob:node-test-mind']);
@@ -814,10 +949,10 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   assert.equal(mindar.scene.background, null);
   assert.equal(typeof mindar.renderer.loop, 'function');
   assert.equal(group.visible, false);
-  assert.equal(mindar.video.paused, false, 'unrecognized target does not stop camera playback');
+  assert.equal(visualRoot.visible, false);
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 0, 'unrecognized anchor is not rendered');
-  mindar.anchor.group.visible = true;
+  anchorRoot.visible = true;
   mindar.anchor.onTargetFound();
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 0, 'found alone cannot display a stale pose');
@@ -829,15 +964,16 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   h.document.hidden = true; h.document.dispatch('visibilitychange');
   assert.equal(mindar.renderer.loop, null);
   assert.equal(group.visible, false);
+  assert.equal(visualRoot.visible, false);
   assert.equal(mindar.renderer.clearCount, beforeHide + 1);
   mindar.anchor.onTargetUpdate();
   assert.equal(group.visible, false, 'background tracking updates cannot reveal the artwork');
-  const playsBeforeResume = mindar.video.playCount;
-  mindar.video.paused = true; // Simulate a browser suspending camera playback in the background.
+  const playsBeforeResume = previewVideo.playCount;
+  previewVideo.paused = true; // Simulate a browser suspending camera playback in the background.
   h.document.hidden = false; h.document.dispatch('visibilitychange');
-  assert.equal(mindar.video.playCount, playsBeforeResume + 1, 'visible return resumes the paused camera directly');
+  assert.equal(previewVideo.playCount, playsBeforeResume + 1, 'visible return resumes the actual preview video');
   await Promise.resolve();
-  assert.equal(mindar.video.paused, false);
+  assert.equal(previewVideo.paused, false);
   assert.equal(typeof mindar.renderer.loop, 'function');
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 1, 'resume waits for a new tracking callback');
@@ -845,44 +981,54 @@ await test('startAR executes withBackdrop on anchor 0 and reuses the preflight s
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 2);
   const beforeLost = mindar.renderer.clearCount;
-  mindar.anchor.group.visible = false;
+  anchorRoot.visible = false;
   mindar.anchor.onTargetLost();
   assert.equal(group.visible, false);
-  assert.equal(mindar.video.paused, false, 'losing a target keeps the camera preview playing');
+  assert.equal(previewVideo.paused, false, 'losing a target keeps the camera preview playing');
   assert.equal(mindar.renderer.clearCount, beforeLost + 1);
   mindar.anchor.onTargetUpdate();
   mindar.renderer.loop();
   assert.equal(mindar.renderer.renderCount, 2, 'lost target does not leave artwork floating');
-  mindar.anchor.group.visible = true;
+  anchorRoot.visible = true;
   mindar.anchor.onTargetFound();
   mindar.anchor.onTargetUpdate();
   mindar.renderer.loop();
   assert.equal(group.visible, true);
   assert.equal(mindar.renderer.renderCount, 3, 'reacquisition displays the newly reported pose');
-  return { anchor: 0, backdropWorldZ: 0, cameraRequests: 1, streamReused: true,
-    hiddenLoopPaused: true, targetLostCleared: true, resumeWaitsForTrackingUpdate: true };
+  return { anchor: 0, siblings: true, nativeFilters: [1, 0], proxyInput: [800, 450],
+    cameraRequests: 1, actualPreview: [1280, 720], hiddenLoopPaused: true,
+    targetLostCleared: true, resumeWaitsForTrackingUpdate: true };
 });
 await test('startAR initialization failure releases scene/renderer and stops its stream', async () => {
   const h = makeRuntime();
   let resources;
   h.control.arError = new Error('mock initialization failure');
-  h.control.onARStart = mindar => { resources = watchResources(mindar.anchor.group, Object.values(h.tex)); };
+  h.control.onARStart = mindar => {
+    resources = watchResources(mindar.scene.getObjectByName('ar-visual-root'), Object.values(h.tex));
+  };
   await h.runtime.startAR();
   assert.deepEqual(h.musicCalls, [['enter', false], ['stop']], 'AR startup failure stops music immediately');
   assert.ok(resources);
   resources.assertReleased();
   const mindar = h.mindars[0];
+  const previewVideo = h.document.created.find(node => node.tagName === 'VIDEO');
+  assert.ok(previewVideo);
   assert.equal(h.track.stops, 1);
   assert.equal(mindar.controller.stops, 1);
+  assert.equal(mindar.controller.input, mindar.video, 'failed startup stops the controller using its proxy input');
   assert.equal(mindar.renderer.disposeCount, 1);
   assert.equal(mindar.renderer.loop, null);
-  for (const node of [mindar.renderer.domElement, mindar.cssRenderer.domElement, mindar.video]) {
+  for (const node of [mindar.renderer.domElement, mindar.cssRenderer.domElement]) {
     assert.equal(node.parentNode, null);
     assert.equal(node.removeCount, 1);
   }
-  assert.equal(mindar.video.srcObject, null, 'failed startup disposes the shared preview');
-  assert.equal(mindar.video.paused, true);
-  for (const type of ['loadedmetadata', 'loadeddata', 'playing', 'error', 'timeupdate']) assert.equal(mindar.video.count(type), 0);
+  assert.equal(previewVideo.parentNode, null);
+  assert.equal(previewVideo.removeCount, 1);
+  assert.equal(mindar.video.parentNode, null, 'offscreen proxy is not inserted into the DOM');
+  assert.equal(mindar.video.removeCount, 0, 'offscreen proxy is disposed without a DOM remove');
+  assert.equal(previewVideo.srcObject, null, 'failed startup disposes the real shared preview');
+  assert.equal(previewVideo.paused, true);
+  for (const type of ['loadedmetadata', 'loadeddata', 'playing', 'error', 'timeupdate']) assert.equal(previewVideo.count(type), 0);
   assert.equal(h.elements.cameraResume.count('click'), 0);
   assert.equal(h.runtime.snapshot().arBusy, false);
   assert.equal(h.elements.status.classList.contains('hidden'), false, 'startup failure remains visible');
@@ -890,6 +1036,142 @@ await test('startAR initialization failure releases scene/renderer and stops its
   assert.equal(h.elements.cameraResume.hidden, true);
   assert.deepEqual(h.urls.revoked, ['blob:node-test-mind']);
   return { ...resources.summary(), stoppedTracks: h.track.stops, rendererDisposals: 1 };
+});
+
+await test('ARSession forwards bound resize while healthy and no-ops after failure', async () => {
+  const h = makeRuntime();
+  h.control.arError = new Error('mock initialization failure after start');
+  let normalResizeForwarded = false;
+  h.control.onARStart = mindar => {
+    const before = mindar.resizeCalls;
+    h.window.dispatch('resize');
+    normalResizeForwarded = mindar.resizeCalls === before + 1;
+  };
+  await h.runtime.startAR();
+  const mindar = h.mindars[0];
+  assert.equal(normalResizeForwarded, true, 'healthy subclass forwards to MindARThree.resize');
+  assert.equal(mindar.controller.stops, 1);
+  assert.equal(mindar.renderer.disposeCount, 1);
+  const afterFailure = mindar.resizeCalls;
+  assert.equal(h.window.count('resize'), 1, 'vendor anonymous bound listener remains attached');
+  h.window.dispatch('resize');
+  assert.equal(mindar.resizeCalls, afterFailure,
+    'late bound resize reaches the subclass guard without touching disposed renderer state');
+  return { forwardedWhileHealthy: normalResizeForwarded, noOpAfterFailure: true,
+    retainedBoundListeners: h.window.count('resize'), baseResizeCalls: mindar.resizeCalls };
+});
+
+await test('startAR full-input pose follower snaps, smooths, reacquires, and hides stale poses', async () => {
+  const h = makeRuntime('?tracking=full');
+  await h.runtime.startAR();
+  const mindar = h.mindars[0], anchorRoot = mindar.anchor.group;
+  const visualRoot = mindar.scene.getObjectByName('ar-visual-root');
+  const group = visualRoot.children[0], previewVideo = h.document.created.find(node => node.tagName === 'VIDEO');
+  assert.equal(mindar.video, previewVideo, '?tracking=full gives MindAR the actual video without a proxy canvas');
+  assert.equal(mindar.controller.input, previewVideo);
+  assert.deepEqual([mindar.controller.inputWidth, mindar.controller.inputHeight], [1280, 720]);
+  assert.equal(h.document.created.filter(node => node.tagName === 'VIDEO').length, 1);
+  assert.equal(h.raf.pending.size, 0, 'full-resolution tracking still adds no rAF loop');
+
+  const first = { position: new THREE.Vector3(0.25, -0.1, 1.4), rotation: new THREE.Quaternion()
+    .setFromEuler(new THREE.Euler(0.1, -0.2, 0.35)), scale: 1.4 };
+  anchorRoot.matrix.copy(rigidMatrix(first.position.x, first.position.y, first.position.z,
+    0.1, -0.2, 0.35, first.scale));
+  anchorRoot.visible = true;
+  mindar.anchor.onTargetFound();
+  mindar.anchor.onTargetUpdate();
+  assert.equal(visualRoot.visible, true);
+  assert.equal(group.visible, true);
+  nearVector(visualRoot.position, first.position.toArray(), 1e-9, 'first raw pose snaps position');
+  nearVector(visualRoot.quaternion, first.rotation.toArray(), 1e-9, 'first raw pose snaps rotation');
+  near(visualRoot.scale.x, first.scale, 1e-9, 'first raw pose snaps uniform scale');
+  mindar.renderer.loop();
+  assert.equal(mindar.renderer.renderCount, 1);
+  const expectedArtOrigin = new THREE.Vector3(0, 0, 0.01 * first.scale)
+    .applyQuaternion(first.rotation).add(first.position);
+  nearVector(group.getWorldPosition(new THREE.Vector3()), expectedArtOrigin.toArray(), 1e-9,
+    'the art receives the raw pose once plus its paper-plane offset');
+
+  const planeBeforeMove = meshWithMap(group, 'bus').material.clippingPlanes[0].constant;
+  const second = new THREE.Vector3(1.05, -0.1, 1.4);
+  anchorRoot.matrix.copy(rigidMatrix(second.x, second.y, second.z, 0.1, -0.2, 0.35, first.scale));
+  nearVector(visualRoot.position, first.position.toArray(), 1e-9,
+    'changing the raw anchor matrix alone does not move the sibling visual root');
+  mindar.anchor.onTargetUpdate();
+  nearVector(visualRoot.position, first.position.toArray(), 1e-9,
+    'a later pose sample updates the target but waits for a render step');
+  h.raf.advance(16);
+  mindar.renderer.loop();
+  assert.ok(visualRoot.position.x > first.position.x && visualRoot.position.x < second.x,
+    'the next render advances toward the newly sampled pose');
+  assert.ok(meshWithMap(group, 'bus').material.clippingPlanes[0].constant !== planeBeforeMove,
+    'render updates world clipping planes with the visual-root transform');
+  const currentPosition = visualRoot.position.clone();
+
+  anchorRoot.visible = false;
+  mindar.anchor.onTargetLost();
+  assert.equal(visualRoot.visible, false);
+  assert.equal(group.visible, false);
+  anchorRoot.matrix.copy(rigidMatrix(-0.6, 0.3, 2.2, -0.2, 0.15, -0.4, 0.9));
+  anchorRoot.visible = true;
+  mindar.anchor.onTargetFound();
+  mindar.anchor.onTargetUpdate();
+  nearVector(visualRoot.position, [-0.6, 0.3, 2.2], 1e-9,
+    'reacquisition snaps directly to its first newly accepted pose');
+  near(visualRoot.scale.x, 0.9, 1e-9, 'reacquisition also snaps scale');
+  assert.equal(visualRoot.visible, true);
+  assert.notDeepEqual(visualRoot.position.toArray(), currentPosition.toArray());
+  const rendersBeforeStale = mindar.renderer.renderCount;
+  h.raf.advance(401);
+  mindar.renderer.loop();
+  assert.equal(visualRoot.visible, false, 'pose older than 400ms is reset and hidden');
+  assert.equal(group.visible, false);
+  assert.equal(mindar.renderer.renderCount, rendersBeforeStale, 'stale pose is never rendered');
+  assert.equal(h.track.stops, 0, 'pose loss does not stop the shared camera');
+  return { trackingInput: 'actual preview video, 1280x720', firstSample: 'snap',
+    laterSample: 'target-only until render', reacquisition: 'snap', staleAfterMs: 401,
+    rawAndVisualRootsAreSiblings: true, renderCount: mindar.renderer.renderCount };
+});
+
+await test('startAR ignores an old pose callback until controller tracking resumes', async () => {
+  const h = makeRuntime('?tracking=full');
+  await h.runtime.startAR();
+  const mindar = h.mindars[0], anchorRoot = mindar.anchor.group;
+  const visualRoot = mindar.scene.getObjectByName('ar-visual-root'), group = visualRoot.children[0];
+  const tracking = mindar.controller.trackingStates[0];
+  assert.ok(tracking);
+  assert.equal(tracking.isTracking, true);
+  const oldPose = rigidMatrix(0.3, -0.15, 1.7, 0.1, -0.2, 0.25, 1.1);
+  anchorRoot.matrix.copy(oldPose);
+  anchorRoot.visible = true;
+  mindar.anchor.onTargetFound();
+  mindar.anchor.onTargetUpdate();
+  nearVector(visualRoot.position, [0.3, -0.15, 1.7], 1e-9, 'valid pose is accepted');
+  mindar.renderer.loop();
+  assert.equal(mindar.renderer.renderCount, 1);
+
+  h.raf.advance(401);
+  mindar.renderer.loop();
+  assert.equal(visualRoot.visible, false, 'the valid sample becomes stale and hides');
+  assert.equal(group.visible, false);
+  const renderCount = mindar.renderer.renderCount;
+  tracking.isTracking = false;
+  mindar.anchor.onTargetUpdate(); // The vendor may report the previous matrix during missTolerance.
+  assert.equal(visualRoot.visible, false, 'isTracking=false cannot revive the old matrix');
+  assert.equal(group.visible, false);
+  assert.equal(mindar.renderer.renderCount, renderCount);
+
+  tracking.isTracking = true;
+  const fresh = rigidMatrix(-0.55, 0.28, 2.1, -0.12, 0.18, -0.4, 0.85);
+  anchorRoot.matrix.copy(fresh);
+  mindar.anchor.onTargetUpdate();
+  nearVector(visualRoot.position, [-0.55, 0.28, 2.1], 1e-9,
+    'a new sample after tracking resumes snaps from the reset state');
+  assert.equal(visualRoot.visible, true);
+  assert.equal(group.visible, true);
+  assert.equal(h.track.stops, 0, 'miss tolerance does not stop the camera stream');
+  return { staleAfterMs: 401, falseTrackingOldSampleIgnored: true, trueTrackingFreshSampleSnaps: true,
+    renderCount, controllerTrackingState: tracking.isTracking };
 });
 
 await test('enterVR / exitVR three real-art cycles cancel rAF, remove per-scene listeners and dispose', async () => {
@@ -988,26 +1270,49 @@ await test('enterVR / exitVR three real-art cycles cancel rAF, remove per-scene 
   return { cycles, persistentGlobalListeners: 'one each; no per-entry accumulation' };
 });
 
-await test('VR animation follows visible performance time at 60Hz and sparse rAF; damping stays clamped', async () => {
+await test('VR bus and wheels follow visible loop time at 60Hz and sparse rAF; damping stays clamped', async () => {
   const h = makeRuntime();
   await h.runtime.enterVR(false);
   const state = h.runtime.snapshot().vrState, busGroup = meshWithMap(state.art.group, 'bus').parent;
-  const animate = state.art.animate, samples = [];
+  const wheelFaces = busGroup.children.slice(1).map(wheel => wheel.children[1]);
+  const loop = createBusLoop(meta), animate = state.art.animate, samples = [];
   let t = 0;
   state.art.animate = time => { t = time; animate(time); };
   for (let frame = 1; frame <= 540; frame++) {
     h.raf.advance(1000 / 60);
-    if ([1, 54, 240, 444, 450, 540].includes(frame)) samples.push({ frame, now: h.raf.now, t, busX: busGroup.position.x });
+    const elapsed = Math.max(0, t - 0.9), expected = loop.sample(elapsed);
+    near(busGroup.position.x, expected.x, 1e-9, `60Hz bus x at frame ${frame}`);
+    wheelFaces.forEach((wheel, index) => near(wheel.rotation.z, expected.angle, 1e-9,
+      `60Hz wheel ${index} angle at frame ${frame}`));
+    if ([1, 54, 240, 270, 444, 450, 540].includes(frame)) {
+      samples.push({ frame, now: h.raf.now, t, busX: busGroup.position.x, wheelAngle: wheelFaces[0].rotation.z });
+    }
     assert.equal(h.raf.pending.size, 1);
+    if (frame === 270) {
+      const paused = { t, x: busGroup.position.x, angle: wheelFaces[0].rotation.z };
+      h.document.hidden = true; h.document.dispatch('visibilitychange');
+      assert.equal(h.raf.pending.size, 0);
+      h.raf.advance(5000);
+      near(t, paused.t, 1e-12, 'hidden time is excluded from animation');
+      near(busGroup.position.x, paused.x, 1e-12, 'bus position holds while hidden');
+      near(wheelFaces[0].rotation.z, paused.angle, 1e-12, 'wheel rotation holds while hidden');
+      h.document.hidden = false; h.document.dispatch('visibilitychange');
+      assert.equal(h.raf.pending.size, 1, 'visible return schedules one fresh frame');
+    }
   }
   near(t, 9, 1e-9);
-  near(busGroup.position.x, 0);
-  near(busGroup.position.z, -0.04);
-  assert.equal(samples.at(-2).busX, 0, 'bus rests after start 0.9s + duration 6.5s');
+  const expectedAtNine = loop.sample(Math.max(0, t - 0.9));
+  near(busGroup.position.x, expectedAtNine.x, 1e-9);
+  near(wheelFaces[0].rotation.z, expectedAtNine.angle, 1e-9);
+  near(busGroup.position.z, -0.04, 1e-12, 'VR bus depth remains unchanged');
+  assert.notEqual(busGroup.position.x, 0, 'the complete loop does not park after its first pass');
+  assert.ok(samples.find(sample => sample.frame === 450).busX !== 0);
   h.runtime.exitVR();
+
   const slow = makeRuntime();
   await slow.runtime.enterVR(false);
   const slowState = slow.runtime.snapshot().vrState, slowBus = meshWithMap(slowState.art.group, 'bus').parent;
+  const slowWheels = slowBus.children.slice(1).map(wheel => wheel.children[1]);
   const slowAnimate = slowState.art.animate;
   let slowT = 0;
   const sparseSamples = [];
@@ -1016,18 +1321,23 @@ await test('VR animation follows visible performance time at 60Hz and sparse rAF
     // Missing and untrustworthy callback arguments must not affect performance.now().
     const timestamp = frame % 2 ? -12345 : 'omit';
     slow.raf.advance(1000, timestamp);
+    const expected = loop.sample(Math.max(0, slowT - 0.9));
+    near(slowBus.position.x, expected.x, 1e-9, `sparse bus x at callback ${frame + 1}`);
+    slowWheels.forEach((wheel, index) => near(wheel.rotation.z, expected.angle, 1e-9,
+      `sparse wheel ${index} angle at callback ${frame + 1}`));
     sparseSamples.push({ callback: frame + 1, performanceNow: slow.raf.now,
-      callbackTimestamp: timestamp, t: slowT, busX: slowBus.position.x });
+      callbackTimestamp: timestamp, t: slowT, busX: slowBus.position.x, wheelAngle: slowWheels[0].rotation.z });
   }
   near(slowT, 1 / 60 + 8);
-  near(slowBus.position.x, 0);
+  near(slowBus.position.z, -0.04, 1e-12, 'sparse VR bus depth remains unchanged');
   assert.ok(slow.runtime.dampingInputs.every(dt => dt >= 0 && dt <= 0.1));
   near(slow.runtime.dampingInputs.at(-1), 0.1);
   const sparse = { callbacks: 9, wallClockMs: slow.raf.now, animationSeconds: slowT,
-    busX: slowBus.position.x, samples: sparseSamples, dampingMaxDt: Math.max(...slow.runtime.dampingInputs) };
+    busX: slowBus.position.x, wheelAngle: slowWheels[0].rotation.z, samples: sparseSamples,
+    dampingMaxDt: Math.max(...slow.runtime.dampingInputs) };
   slow.runtime.exitVR();
   return { normal60Hz: samples, sparse,
-    boundary: 'first/resumed frame uses 1/60s; subsequent animation uses visible elapsed time, camera damping alone clamps at 0.1s' };
+    boundary: 'AR/VR bus samples use explicit startDriveIn offsets; elapsed visible time drives position and unwrapped wheel angle, camera damping alone clamps at 0.1s' };
 });
 
 for (const stage of ['three', 'assets']) {
@@ -1097,7 +1407,7 @@ console.log(JSON.stringify({ passed: failed === 0, total: results.length,
     'Frame-monitor time, rAF, timers, DOM events, renderer, asset gates and MindAR startup are deterministic mocks; debug is false.',
     'VR cancellation invalidates requests and prevents resurrection; it does not abort the shared asset download itself.',
     'Persistent global pointer/orientation handlers remain once by design; per-scene resize/visibility handlers are removed.',
-    'AR success anchor/stream/visibility and initialization-failure teardown are tested; no successful-session exitAR API or real recognition is exercised.',
-    'VR animation uses elapsed performance.now time; first/resumed frame uses 1/60s and hidden time is excluded. Camera damping alone clamps at 0.1s.'
+    'AR preview/proxy input, sibling pose-root sampling/rendering, loss/reacquisition/stale hiding, and startup-failure teardown use deterministic mocks; no successful-session exitAR API or real recognition is exercised.',
+    'VR animation uses elapsed performance.now time; first/resumed frame uses 1/60s, hidden time is excluded, and the 8s bus loop continues with unwrapped wheel travel. Camera damping alone clamps at 0.1s.'
   ] }, null, 2));
 if (failed) process.exitCode = 1;

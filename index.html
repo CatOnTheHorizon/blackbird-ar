@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>黑鸟面包巴士 · 月历彩蛋</title>
+<title>《再见，黑鸟》 · 2027 伊坂幸太郎月历</title>
 <script type="importmap">
 {
   "imports": {
@@ -69,11 +69,11 @@
 
 <div id="splash">
   <div class="bird">🐦‍⬛</div>
-  <h1>黑鸟面包巴士</h1>
-  <p>2026 伊坂幸太郎月历 · 隐藏彩蛋</p>
+  <h1>《再见，黑鸟》</h1>
+  <p>2027 伊坂幸太郎月历</p>
   <button id="arBtn">开始 AR · 对准月历插画</button>
   <button id="vrBtn">进入 VR · 插画动起来</button>
-  <p style="font-size:11px;opacity:.4;margin-top:10px">v32</p>
+  <p style="font-size:11px;opacity:.4;margin-top:10px">v33</p>
 </div>
 
 <div id="container"></div>
@@ -86,13 +86,15 @@
   <div id="vrHint">拖动画面环视 · 手机上可移动观看</div>
 </div>
 
-<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=32" preload="none" loop playsinline></audio>
+<audio id="backgroundMusic" src="./assets/audio/bye-bye-blackbird.mp3?v=33" preload="none" loop playsinline></audio>
 <div id="musicControls">
   <span id="musicNote" aria-live="polite">Paul McCartney · Bye Bye Blackbird</span>
   <button id="musicToggle" type="button" aria-label="播放背景音乐" aria-pressed="false">♫ 开启音乐</button>
 </div>
 
 <script type="module">
+import { createBusLoop } from './lib/bus-motion.mjs';
+
 /* 重依赖懒加载：页面秒开、按钮秒响应 */
 let THREE = null;
 let MindARThree = null;
@@ -252,10 +254,141 @@ function createCameraPreview(stream, container, onFailure = () => {}) {
   };
 }
 
+/* 预览保留原清晰度；仅识别采样缩小，不裁切、不镜像、不另开 rAF。 */
+function createTrackingInput(video, { maxEdge = 800, onFailure = () => {} } = {}) {
+  const sourceWidth = video.videoWidth, sourceHeight = video.videoHeight;
+  const full = reason => ({ input: video, width: sourceWidth, height: sourceHeight, scaled: false, reason });
+  let state = full('original'), context = null;
+  if (maxEdge > 0 && sourceWidth !== sourceHeight && Math.max(sourceWidth, sourceHeight) > maxEdge) {
+    const gcd = (a, b) => b ? gcd(b, a % b) : a;
+    const divisor = gcd(sourceWidth, sourceHeight);
+    const unitWidth = sourceWidth / divisor, unitHeight = sourceHeight / divisor;
+    const multiple = Math.floor(maxEdge / Math.max(unitWidth, unitHeight));
+    if (multiple > 0) {
+      const canvas = document.createElement('canvas');
+      canvas.width = unitWidth * multiple;
+      canvas.height = unitHeight * multiple;
+      try {
+        context = canvas.getContext('2d', { alpha: false });
+        if (context) {
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          /* 当前固定版本 MindAR 同时读取 videoWidth/Height 和 width/height。 */
+          canvas.videoWidth = canvas.width;
+          canvas.videoHeight = canvas.height;
+          state = { input: canvas, width: canvas.width, height: canvas.height, scaled: true, reason: 'scaled' };
+        } else state = full('canvas unavailable');
+      } catch (_) { context = null; state = full('canvas unavailable'); }
+    } else state = full('aspect fallback');
+  } else if (sourceWidth === sourceHeight) state = full('square fallback');
+  let disposed = false, broken = false, callback = null, previousTime = video.currentTime;
+  const refresh = () => {
+    if (disposed || broken || document.hidden || video.paused || video.readyState < 2) return;
+    if (video.videoWidth * sourceHeight !== video.videoHeight * sourceWidth) {
+      broken = true;
+      onFailure(new Error('摄像头画幅比例已改变，请重新进入 AR'));
+      return;
+    }
+    if (!state.scaled || video.currentTime === previousTime) return;
+    try {
+      context.drawImage(video, 0, 0, state.width, state.height);
+      previousTime = video.currentTime;
+    } catch (error) {
+      broken = true;
+      onFailure(new Error('识别画面采样失败：' + error.message));
+    }
+  };
+  const nextFrame = () => {
+    callback = null;
+    refresh();
+    if (!disposed && !broken) callback = video.requestVideoFrameCallback(nextFrame);
+  };
+  if (state.scaled && typeof video.requestVideoFrameCallback === 'function') {
+    callback = video.requestVideoFrameCallback(nextFrame);
+  }
+  return {
+    ...state, refresh,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (callback != null && typeof video.cancelVideoFrameCallback === 'function') video.cancelVideoFrameCallback(callback);
+      callback = null;
+    }
+  };
+}
+
+/* 只在 scene 下显示刚体姿态，不把完整跟踪矩阵再次乘到 anchor 子节点。 */
+function createPoseFollower(root) {
+  const position = new THREE.Vector3(), rotation = new THREE.Quaternion();
+  const x = new THREE.Vector3(), y = new THREE.Vector3(), z = new THREE.Vector3();
+  const basis = new THREE.Matrix4(), nextPosition = new THREE.Vector3(), nextRotation = new THREE.Quaternion();
+  const velocity = new THREE.Vector3(), angularVelocity = new THREE.Vector3(), delta = new THREE.Vector3();
+  const turnDelta = new THREE.Quaternion();
+  let initialized = false, lastSample = null, scale = 1, response = 30;
+  const reset = () => {
+    initialized = false; lastSample = null; response = 30;
+    velocity.set(0, 0, 0); angularVelocity.set(0, 0, 0); root.visible = false;
+  };
+  reset();
+  return {
+    reset,
+    sample(matrix, now) {
+      const e = matrix.elements;
+      if (!Number.isFinite(now) || !e.every(Number.isFinite) || Math.abs(e[15] - 1) > 0.001
+          || Math.abs(e[3]) + Math.abs(e[7]) + Math.abs(e[11]) > 0.001) { reset(); return false; }
+      x.set(e[0], e[1], e[2]); y.set(e[4], e[5], e[6]); z.set(e[8], e[9], e[10]);
+      const sx = x.length(), sy = y.length(), sz = z.length();
+      const nextScale = (sx + sy + sz) / 3;
+      if (!Number.isFinite(nextScale) || Math.min(sx, sy, sz) < 1e-6
+          || Math.max(sx, sy, sz) / Math.min(sx, sy, sz) > 1.1) { reset(); return false; }
+      x.normalize(); y.addScaledVector(x, -y.dot(x));
+      if (y.lengthSq() < 1e-6) { reset(); return false; }
+      y.normalize();
+      const handedness = z.dot(delta.crossVectors(x, y));
+      if (handedness <= 0) { reset(); return false; }
+      z.crossVectors(x, y);
+      basis.makeBasis(x, y, z);
+      nextRotation.setFromRotationMatrix(basis).normalize();
+      nextPosition.set(e[12], e[13], e[14]);
+      if (lastSample != null && (now < lastSample || now - lastSample > 400)) reset();
+      if (!initialized) {
+        position.copy(nextPosition); rotation.copy(nextRotation); scale = nextScale;
+        root.position.copy(position); root.quaternion.copy(rotation); root.scale.setScalar(scale);
+        initialized = true;
+      } else {
+        const elapsed = Math.max(0.016, (now - lastSample) / 1000);
+        /* 只平滑自适应增益所用的速度向量，避免把静止噪声误判为快移。 */
+        const gain = 1 - Math.exp(-12 * elapsed);
+        velocity.lerp(delta.copy(nextPosition).sub(position).divideScalar(nextScale * elapsed), gain);
+        turnDelta.copy(rotation).invert().multiply(nextRotation);
+        if (turnDelta.w < 0) turnDelta.set(-turnDelta.x, -turnDelta.y, -turnDelta.z, -turnDelta.w);
+        delta.set(turnDelta.x, turnDelta.y, turnDelta.z);
+        const sine = delta.length();
+        if (sine > 1e-8) delta.multiplyScalar(2 * Math.atan2(sine, turnDelta.w) / sine / elapsed);
+        angularVelocity.lerp(delta, gain);
+        response = Math.min(60, 30 + Math.max(0, velocity.length() - 0.08) * 80
+          + Math.max(0, angularVelocity.length() - 0.35) * 12);
+        position.copy(nextPosition); rotation.copy(nextRotation); scale = nextScale;
+      }
+      lastSample = now;
+      root.visible = true;
+      return true;
+    },
+    update(dt, now) {
+      if (!initialized) return false;
+      if (now - lastSample > 400) { reset(); return false; }
+      const blend = 1 - Math.exp(-response * Math.max(0, Math.min(dt, 0.1)));
+      root.position.lerp(position, blend);
+      root.quaternion.slerp(rotation, blend).normalize();
+      root.scale.setScalar(scale);
+      return true;
+    }
+  };
+}
+
 function createFrameMonitor(renderer, mode) {
   const size = new THREE.Vector2();
   const stats = { mode, fps: null, frameMs: null, trackingMs: null, tracking: false,
-    pixelRatio: renderer.getPixelRatio(), drawCalls: 0, canvas: null, camera: null };
+    pixelRatio: renderer.getPixelRatio(), drawCalls: 0, canvas: null, camera: null, input: null };
   let panel = null;
   if (PERF_DEBUG) {
     panel = document.createElement('output');
@@ -271,8 +404,9 @@ function createFrameMonitor(renderer, mode) {
     panel.textContent = mode + ' · ' + (stats.fps == null ? '等待画面' : stats.fps + ' fps / ' + stats.frameMs + ' ms')
       + '\nDPR ' + stats.pixelRatio + ' · ' + stats.drawCalls + ' draws'
       + (stats.canvas ? ' · ' + stats.canvas.join('×') : '')
-      + (mode === 'AR' ? '\n跟踪 ' + (stats.tracking ? (stats.trackingMs == null ? '采样中' : stats.trackingMs + ' ms/次') : '未识别') : '')
-      + (camera ? '\n相机 ' + camera.width + '×' + camera.height + ' / ' + (camera.frameRate || '?') + ' fps' : '');
+      + (mode === 'AR' ? '\n跟踪回调 ' + (stats.tracking ? (stats.trackingMs == null ? '采样中' : stats.trackingMs + ' ms/次') : '未识别') : '')
+      + (camera ? '\n相机 ' + camera.width + '×' + camera.height + ' / ' + (camera.frameRate || '?') + ' fps' : '')
+      + (stats.input ? '\n识别输入 ' + stats.input.width + '×' + stats.input.height + ' · ' + stats.input.reason : '');
   };
   let previous = null, started = null, frames = 0, totalMs = 0, slow = 0, slowWindows = 0;
   let previousTrack = null, trackMs = 0, trackSamples = 0, warmup = true;
@@ -287,6 +421,10 @@ function createFrameMonitor(renderer, mode) {
     reset,
     setCamera(settings) {
       stats.camera = { width: settings.width, height: settings.height, frameRate: settings.frameRate };
+      publish();
+    },
+    setInput(input) {
+      stats.input = { width: input.width, height: input.height, reason: input.reason };
       publish();
     },
     setTracking(visible) {
@@ -512,7 +650,7 @@ const pxY = (py) => (0.5 - py / 1280) * (1280 / 1745);
 let ART_META = null;
 let ART_TEX = null;
 
-const ART_VERSION = '32';
+const ART_VERSION = '33';
 const artUrl = (name) => './assets/sprites/' + name + '?v=' + ART_VERSION;
 let ART_LOADING = null;
 async function loadArtAssets(onProgress) {
@@ -609,7 +747,7 @@ function skyPlane(stops, targetSize = null) {
 }
 
 function createArtScene(meta, tex, opts = {}) {
-  const { withSky = false, withBackdrop = false, driveFromX = 1.35, driveDur = 4.2 } = opts;
+  const { withSky = false, withBackdrop = false, driveDur = 8 } = opts;
   const group = new THREE.Group();
 
   if (withBackdrop) group.add(skyPlane(meta.skyStops, meta.size));
@@ -631,7 +769,7 @@ function createArtScene(meta, tex, opts = {}) {
   const starColor = new THREE.Color();
   for (let i = 0; i < 24; i++) {
     const s = { x: (Math.random() - 0.5) * 1.1, y: -0.02 + Math.random() * 0.45,
-      z: -1.0 + Math.random() * 0.45, ph: Math.random() * Math.PI * 2,
+      z: withBackdrop ? 0.002 + Math.random() * 0.003 : -1.0 + Math.random() * 0.45, ph: Math.random() * Math.PI * 2,
       base: 0.5 + Math.random() * 0.8 };
     stars.push(s);
     starTransform.position.set(s.x, s.y, s.z);
@@ -643,7 +781,7 @@ function createArtScene(meta, tex, opts = {}) {
   group.add(starMesh);
 
   /* —— 站牌（绕底部支点轻摆） —— */
-  const signZ = 0.012;
+  const signZ = withBackdrop ? 0.015 : 0.012;
   const signGroup = new THREE.Group();
   {
     const [x0, y0, x1, y1] = meta.rects.sign;
@@ -658,7 +796,7 @@ function createArtScene(meta, tex, opts = {}) {
   }
 
   /* —— 长椅 —— */
-  const bench = spriteMesh('bench', meta, tex, 0.02);
+  const bench = spriteMesh('bench', meta, tex, withBackdrop ? 0.035 : 0.02);
   group.add(bench);
 
   /* —— 面包巴士（整体悬浮/驶入），车轮独立旋转 —— */
@@ -692,7 +830,22 @@ function createArtScene(meta, tex, opts = {}) {
     busGroup.add(wheel);
     wheels.push(face);
   });
-  busGroup.position.z = -0.04;
+  const busZ = withBackdrop ? 0.005 : -0.04;
+  const loop = createBusLoop(meta, { duration: driveDur });
+  busGroup.name = 'bus-loop';
+  busGroup.position.set(loop.start, 0, busZ);
+  /* 以整幅插画为窗口裁切车组，侧看时也不暴露换圈瞬移。 */
+  const localClip = [new THREE.Plane(new THREE.Vector3(1, 0, 0), 0.56),
+    new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0.56)];
+  const worldClip = localClip.map(plane => plane.clone());
+  busGroup.traverse(object => {
+    if (!object.isMesh) return;
+    object.material.clippingPlanes = worldClip;
+    object.onBeforeRender = () => {
+      group.updateWorldMatrix(true, false);
+      worldClip.forEach((plane, i) => plane.copy(localClip[i]).applyMatrix4(group.matrixWorld));
+    };
+  });
   group.add(busGroup);
 
   /* —— 鸟群 —— */
@@ -705,54 +858,29 @@ function createArtScene(meta, tex, opts = {}) {
     { name: 'bird6', z: 0.049, phase: 4.2 },
   ];
   birdDefs.forEach((d) => {
-    const m = spriteMesh(d.name, meta, tex, d.z);
+    const m = spriteMesh(d.name, meta, tex, d.z + (withBackdrop ? 0.02 : 0));
     const base = m.position.clone();
     m.userData = { baseY: base.y, phase: d.phase, baseRot: 0 };
     birds.push(m);
     group.add(m);
   });
 
-  /* —— 驶入状态 —— */
-  const busRest = new THREE.Vector3(0, 0, -0.04);
-  const busStart = new THREE.Vector3(driveFromX, 0, -0.04);
+  /* —— 持续行驶：位置按圈回绕，轮角按未取模的累计路程计算。 —— */
   let drive = null, wheelAngle = 0;
-  let hornFired = false, cheerFired = false, wasDriving = false;
 
   const animate = (t) => {
-    /* 巴士 */
-    let driving = false, driveK = 1;
     if (drive) {
-      const p = Math.min(1, Math.max(0, (t - drive.t0) / driveDur));
-      driveK = p;
-      const e = p * p * (3 - 2 * p);                         // 平滑起步、缓缓停下
-      const radius = meta.wheelFaces[0].rollingRadius * UNIT;
-      wheelAngle = drive.wheelStart - (-busStart.x * e) / radius;
-      if (p < 1) {
-        driving = true;
-        busGroup.position.x = busStart.x * (1 - e);
-        busGroup.position.y = busRest.y
-          + Math.sin(p * Math.PI) * 0.006                    // 轻微起伏
-          + Math.sin(t * 8) * 0.002 * (1 - e);               // 行驶微震
-        busGroup.rotation.z = 0;
-        busGroup.rotation.x = 0;
-      } else {
-        drive = null;
-        busGroup.position.copy(busRest);
-        busGroup.rotation.set(0, 0, 0);
-      }
+      const sample = loop.sample(t - drive.t0);
+      busGroup.position.x = sample.x;
+      wheelAngle = drive.wheelStart + sample.angle;
     }
-    if (!driving) {
-      busGroup.position.y = busRest.y + Math.sin(t * 1.1) * 0.008;
-      busGroup.rotation.z = Math.sin(t * 0.8) * 0.004;
-    }
-    /* 转角跟随实际驶入距离，停车后不再原地空转。 */
+    busGroup.position.y = Math.sin(t * 8) * 0.002;
     wheels.forEach(w => { w.rotation.z = wheelAngle; });
 
-    /* 鸟群：每只独立地上下跳跃 */
-    const excite = 1 + (1 - driveK) * 1.1;
+    /* 鸟群使用独立时间，不随巴士换圈重置。 */
     birds.forEach((b, i) => {
       const ph = b.userData.phase;
-      const period = (2.4 + (i * 0.53) % 1.6) / excite;   // 各自周期不同
+      const period = 2.4 + (i * 0.53) % 1.6;
       const cyc = ((t / period) + ph) % 1;
       let hop = 0;
       if (cyc < 0.55) {
@@ -841,6 +969,7 @@ async function startAR() {
     statusEl.textContent = '还在等待授权…请检查浏览器是否弹出了摄像头权限窗口，或刷新页面重试';
   }, 25000);
   let camStream = null, preview = null, mindarThree = null, art = null, monitor = null;
+  let trackingInput = null, pose = null;
   let onARVisibility = null, tickInit = null, initTimer = null, cancelStart = null, failed = false;
   const failAR = (error) => {
     if (failed) return;
@@ -856,6 +985,8 @@ async function startAR() {
       mindarThree.renderer.domElement.remove();
       mindarThree.cssRenderer.domElement.remove();
     }
+    if (pose) pose.reset();
+    if (trackingInput) trackingInput.dispose();
     if (art) disposeArtScene(art.group);
     if (monitor) monitor.dispose();
     if (preview) preview.dispose();
@@ -913,36 +1044,51 @@ async function startAR() {
   }
   if (failed) { if (mindUrl) URL.revokeObjectURL(mindUrl); return; }
 
-  mindarThree = new MindARThree({
+  /* vendor 绑定了匿名 resize；失败后禁止它再访问已释放的 renderer。 */
+  class ARSession extends MindARThree {
+    resize() { if (!failed) super.resize(); }
+  }
+  mindarThree = new ARSession({
     container: document.getElementById('container'),
     imageTargetSrc: mindUrl,
     uiLoading: 'no', uiScanning: 'no', uiError: 'no',
     maxTrack: 1,
-    /* 原生 One Euro（毫秒时基）；独立测试静止噪声与移动滞后，不叠加二次平滑。 */
-    filterMinCF: 0.0035,
-    filterBeta: 0.025,
+    /* 原生滤波近直通（毫秒时基），主要平滑交给渲染帧上的刚体姿态。 */
+    filterMinCF: 1,
+    filterBeta: 0,
   });
   const { renderer, scene, camera } = mindarThree;
   renderer.setClearColor(0x000000, 0);
+  renderer.localClippingEnabled = true;
   renderer.domElement.style.zIndex = '1';
   mindarThree.cssRenderer.domElement.style.zIndex = '2';
   mindarThree.cssRenderer.domElement.style.pointerEvents = 'none';
   scene.background = null;
   renderer.setPixelRatio(getRenderPixelRatio(devicePixelRatio, MOBILE_VIEW));
   monitor = createFrameMonitor(renderer, 'AR');
-  monitor.setCamera(camStream.getVideoTracks()[0].getSettings());
+  monitor.setCamera({ ...camStream.getVideoTracks()[0].getSettings(),
+    width: preview.video.videoWidth, height: preview.video.videoHeight });
+  trackingInput = createTrackingInput(preview.video, {
+    maxEdge: new URLSearchParams(location.search).get('tracking') === 'full' ? 0 : 800,
+    onFailure: failAR
+  });
+  monitor.setInput(trackingInput);
   const anchor = mindarThree.addAnchor(0);
   const anchorRoot = anchor.group || anchor;
+  const visualRoot = new THREE.Group();
+  visualRoot.name = 'ar-visual-root';
+  scene.add(visualRoot);
+  pose = createPoseFollower(visualRoot);
 
-  art = createArtScene(ART_META, ART_TEX, { withBackdrop: true, driveFromX: -1.15, driveDur: 5.2 });
+  art = createArtScene(ART_META, ART_TEX, { withBackdrop: true, driveDur: 8 });
   art.group.position.z = 0.01;
   art.group.visible = false;
-  anchorRoot.add(art.group);
+  visualRoot.add(art.group);
 
-  /* 复用已经显示首帧的预览，不再创建视频或二次请求相机。 */
+  /* 显示仍用同一路真实视频；识别可用离屏采样，不再请求相机。 */
   mindarThree._startVideo = async () => {
     if (failed) throw new Error('摄像头预览已停止');
-    mindarThree.video = preview.video;
+    mindarThree.video = trackingInput.input;
     await preview.ready;
   };
   const origAR = mindarThree._startAR.bind(mindarThree);
@@ -958,6 +1104,7 @@ async function startAR() {
   };
   anchor.onTargetLost = () => {
     if (failed) return;
+    pose.reset();
     art.group.visible = false;
     monitor.reset();
     monitor.setTracking(false);
@@ -967,12 +1114,22 @@ async function startAR() {
   };
   anchor.onTargetUpdate = () => {
     if (failed || document.hidden || preview.video.paused || preview.video.readyState < 2 || !anchorRoot.visible) return;
+    /* 丢失容差内 vendor 仍回传旧矩阵，不能把它当作新的有效姿态。 */
+    const trackingState = mindarThree.controller && mindarThree.controller.trackingStates
+      && mindarThree.controller.trackingStates[0];
+    if (trackingState && trackingState.isTracking === false) return;
+    const now = performance.now();
+    if (!pose.sample(anchorRoot.matrix, now)) {
+      art.group.visible = false;
+      renderer.clear();
+      return;
+    }
     if (!art.group.visible) {
       art.group.visible = true;
       monitor.setTracking(true);
       hintEl.classList.add('hidden');
     }
-    monitor.track(performance.now());
+    monitor.track(now);
   };
 
   const t0Init = Date.now();
@@ -1009,7 +1166,24 @@ async function startAR() {
   let driveStarted = false, t = 0;
   const renderAR = () => {
     const dt = clock.getDelta();
-    if (failed || document.hidden || preview.video.paused || preview.video.readyState < 2 || !anchorRoot.visible || !art.group.visible) return;
+    if (failed || document.hidden) return;
+    trackingInput.refresh();
+    if (failed) return;
+    if (preview.video.paused || preview.video.readyState < 2 || !anchorRoot.visible) {
+      if (visualRoot.visible) {
+        pose.reset(); art.group.visible = false; renderer.clear();
+        monitor.setTracking(false);
+      }
+      return;
+    }
+    if (!art.group.visible) return;
+    if (!pose.update(dt, performance.now())) {
+      art.group.visible = false;
+      renderer.clear();
+      monitor.setTracking(false);
+      hintEl.classList.remove('hidden');
+      return;
+    }
     t += dt;
     if (!driveStarted) {
       art.startDriveIn(t + 0.1);
@@ -1022,6 +1196,7 @@ async function startAR() {
   onARVisibility = () => {
     if (failed) return;
     clock.getDelta();
+    pose.reset();
     art.group.visible = false;
     renderer.clear();
     monitor.reset();
@@ -1114,6 +1289,7 @@ async function enterVR(auto = false) {
     renderer.setPixelRatio(getRenderPixelRatio(devicePixelRatio, MOBILE_VIEW));
     renderer.setSize(innerWidth, innerHeight);
     renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.localClippingEnabled = true;
     vrRoot.insertBefore(renderer.domElement, vrRoot.firstChild);
 
     const scene = new THREE.Scene();
@@ -1157,7 +1333,7 @@ async function enterVR(auto = false) {
     window.addEventListener('resize', onResize);
     document.addEventListener('visibilitychange', onVisibility);
 
-    const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveFromX: -1.35, driveDur: 6.5 });
+    const art = createArtScene(ART_META, ART_TEX, { withSky: true, driveDur: 8 });
     state.art = art;
     scene.add(art.group);
     art.startDriveIn(0.9);

@@ -76,7 +76,12 @@ def make_preview_page(project, output, art_version):
     original = (project / "index.html").read_text(encoding="utf-8")
     if runtime_version(original) != art_version:
         raise ValueError("Runtime version changed while building the preview")
-    text = original.replace("./lib/", Path(os.path.relpath(project / "lib", output)).as_posix() + "/")
+    # Rewrite every relative lib reference, including importmap entries and a
+    # runtime module import such as ./lib/bus-motion.mjs. The preview reuses
+    # the project's committed lib tree; it must not silently fall back to an
+    # older copy inside the candidate output.
+    lib_prefix = Path(os.path.relpath(project / "lib", output)).as_posix() + "/"
+    text = original.replace("./lib/", lib_prefix)
     audio = Path(os.path.relpath(project / "assets" / "audio", output)).as_posix() + "/"
     text = text.replace('"./assets/audio/', '"' + audio)
     target = Path(os.path.relpath(project / "assets" / "target.mind", output)).as_posix()
@@ -89,14 +94,18 @@ def make_preview_page(project, output, art_version):
     )
     if badge_count != 1:
         raise ValueError("Expected one matching runtime version badge in index.html")
-    # Debug surface is present only in the isolated preview; it does not alter production.
-    text = replace_once(text, "return { group, animate, startDriveIn };",
-        "return { group, animate, startDriveIn, birds, bench, busGroup, wheels, signGroup };")
+    # Debug references are attached only to the isolated preview's scene graph;
+    # preserve the production createArtScene API and return shape unchanged.
+    text = replace_once(text,
+        "    group.add(m);\n  });\n\n  /* —— 持续行驶：位置按圈回绕，轮角按未取模的累计路程计算。 —— */",
+        "    group.add(m);\n  });\n  group.userData.preview = { busGroup, birds, signGroup };\n\n  /* —— 持续行驶：位置按圈回绕，轮角按未取模的累计路程计算。 —— */")
     text = replace_once(text, "    state.art = art;",
         "    state.art = art;\n    window.__stickerPreview = { art, renderer, scene, camera, pause: false, time: 0, onlyBench: false, lift: 0 };")
+    # Keep the hook independent of camera/clip-plane code so the isolated
+    # preview survives runtime changes around art.animate().
     text = replace_once(text,
-        "      t += elapsed;\n      art.animate(t);\n\n      /* 相机：",
-        "      t += elapsed;\n      const liveT = t;\n      const debug = window.__stickerPreview;\n      const artT = debug.pause ? debug.time : liveT;\n      art.animate(artT);\n      art.birds.forEach(bird => { bird.visible = !debug.onlyBench; bird.position.y += debug.lift * UNIT; });\n      art.busGroup.visible = !debug.onlyBench;\n      art.signGroup.visible = !debug.onlyBench;\n\n      /* 相机：")
+        "      t += elapsed;\n      art.animate(t);",
+        "      t += elapsed;\n      const debug = window.__stickerPreview;\n      const parts = art.group.userData.preview;\n      const artT = debug.pause ? debug.time : t;\n      art.animate(artT);\n      parts.birds.forEach(bird => { bird.visible = !debug.onlyBench; bird.position.y += debug.lift * UNIT; });\n      parts.busGroup.visible = !debug.onlyBench;\n      parts.signGroup.visible = !debug.onlyBench;")
     text = replace_once(text, "</body>", '''<div id="previewChecks" style="position:fixed;bottom:65px;left:12px;z-index:60;display:flex;gap:8px;flex-wrap:wrap"><button data-check="normal">正常动画</button><button data-check="bench">只看长椅</button><button data-check="lift">鸟抬起 55px</button><span style="color:#ddd;font-size:11px">本地 PNG 候选 · 非手机 AR 验收</span></div>
 <script>
 window.__previewMetrics = { errors: [] };
